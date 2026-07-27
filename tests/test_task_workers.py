@@ -244,13 +244,6 @@ async def test_stale_worker_cannot_project_result(
         lease_duration=timedelta(milliseconds=20),
         result_sink=capture_projection,
     )
-    replacement = TaskWorker(
-        ledger,
-        registry,
-        worker_id="worker-current",
-        lease_duration=timedelta(seconds=5),
-    )
-
     stale_run = asyncio.create_task(stale_worker.run_once())
     await asyncio.sleep(0.03)
     replacement_lease = await ledger.claim(
