@@ -73,6 +73,22 @@ OpenPoke is a simplified, open-source take on [Interaction Company’s](https://
 
 The web app proxies API calls to the Python server using the values in `.env`, so keeping both processes running is required for end-to-end flows.
 
+## Task ledger integration tests
+
+The durable task-control-plane tests use PostgreSQL and never call a model
+provider:
+
+```bash
+docker compose --env-file compose.test.env -f compose.test.yaml up -d --wait
+python -m venv .venv
+.venv/bin/pip install -r server/requirements-dev.txt
+PYTHONPATH=. .venv/bin/python -m pytest tests/test_task_acceptance.py tests/test_task_auth.py -q
+docker compose --env-file compose.test.env -f compose.test.yaml down
+```
+
+The test database listens only on `127.0.0.1:55432` and uses trust
+authentication for this disposable local environment.
+
 ## Project Layout
 - `server/` – FastAPI application and agents
 - `web/` – Next.js app
