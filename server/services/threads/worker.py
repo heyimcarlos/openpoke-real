@@ -88,7 +88,12 @@ class AgentRunWorker:
             actor_id=lease.actor_id,
             tenant_id=lease.tenant_id,
             scopes=frozenset(
-                {"chat:send", "tasks:create", "workflows:start"}
+                {
+                    "chat:send",
+                    "tasks:create",
+                    "workflows:start",
+                    "workflows:signal",
+                }
             ),
             composio_user_id=lease.composio_user_id,
         )

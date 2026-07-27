@@ -295,7 +295,7 @@ async def test_interaction_turn_accepts_two_delegations_and_rejects_third(
     assert tool_results[2]["status"] == "error"
     assert (
         tool_results[2]["error"]["error"]
-        == "At most two execution delegations are allowed per interaction turn"
+        == "At most two execution submissions are allowed per interaction turn"
     )
 
     next_result = await runtime.execute("Now book the follow-up")

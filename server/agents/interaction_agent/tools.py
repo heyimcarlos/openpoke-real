@@ -22,7 +22,12 @@ from ...services.threads import (
 )
 from ...services.workflows import (
     DefinitionNotFound,
+    SignalAlreadySatisfied,
+    SignalIdempotencyConflict,
+    SignalTooEarly,
+    WaitNotFound,
     WorkflowService,
+    WorkflowSignalCommand,
     WorkflowStartCommand,
 )
 
@@ -83,6 +88,36 @@ TOOL_SCHEMAS = [
                     "definition_version",
                     "input",
                 ],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "signal_workflow_wait",
+            "description": (
+                "Submit a typed signal to one exact open workflow wait. "
+                "The server resolves tenant, actor, and the predefined route."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "wait_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Exact wait identity returned by the workflow.",
+                    },
+                    "signal_key": {
+                        "type": "string",
+                        "description": "Signal name required by the published wait.",
+                    },
+                    "input": {
+                        "type": "object",
+                        "description": "Typed input required by the published signal.",
+                    },
+                },
+                "required": ["wait_id", "signal_key", "input"],
                 "additionalProperties": False,
             },
         },
@@ -290,6 +325,79 @@ async def start_workflow(
             "status": "started",
             "instance_id": str(started.instance.instance_id),
             "task_id": str(started.task.task_id),
+            "waits": [
+                {
+                    "wait_id": str(wait.wait_id),
+                    "wait_key": wait.key,
+                    "signal_key": wait.signal_key,
+                    "status": next(
+                        (
+                            record.status.value
+                            for record in started.waits
+                            if record.wait_id == wait.wait_id
+                        ),
+                        "pending",
+                    ),
+                }
+                for wait in started.wait_targets
+            ],
+        },
+    )
+
+
+async def signal_workflow_wait(
+    wait_id: str,
+    signal_key: str,
+    input: dict,
+    *,
+    context: InteractionToolContext,
+) -> ToolResult:
+    """Signal one exact Wait without exposing identity or routing authority."""
+    if context.workflow_service is None:
+        return ToolResult(
+            success=False,
+            payload={"error": "Workflow service is unavailable"},
+        )
+    semantic_signal = json.dumps(
+        {
+            "wait_id": wait_id,
+            "signal_key": signal_key,
+            "input": input,
+            "origin_turn_id": context.origin_turn_id,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    command = WorkflowSignalCommand(
+        idempotency_key=(
+            "signal:"
+            + hashlib.sha256(semantic_signal.encode("utf-8")).hexdigest()
+        ),
+        wait_id=wait_id,
+        signal_key=signal_key,
+        input=input,
+    )
+    if context.run_lease is not None:
+        accepted = await context.workflow_service.signal_for_run(
+            context.principal,
+            command,
+            context.run_lease,
+        )
+    else:
+        accepted = await context.workflow_service.signal(
+            context.principal,
+            command,
+        )
+    return ToolResult(
+        success=True,
+        payload={
+            "status": "accepted",
+            "signal_id": str(accepted.signal_id),
+            "wait_id": str(accepted.wait.wait_id),
+            "released_step_ids": [
+                str(step_id) for step_id in accepted.released_step_ids
+            ],
         },
     )
 
@@ -422,6 +530,39 @@ async def handle_tool_call(
                 return ToolResult(
                     success=False,
                     payload={"error": "Workflow definition is not published"},
+                )
+        if name == "signal_workflow_wait":
+            if context is None:
+                return ToolResult(
+                    success=False,
+                    payload={"error": "Execution context is unavailable"},
+                )
+            try:
+                return await signal_workflow_wait(**args, context=context)
+            except SignalTooEarly:
+                return ToolResult(
+                    success=False,
+                    payload={"error": "Workflow wait is not open yet"},
+                )
+            except SignalAlreadySatisfied:
+                return ToolResult(
+                    success=False,
+                    payload={"error": "Workflow wait is already satisfied"},
+                )
+            except DelegationLimitReached:
+                return ToolResult(
+                    success=False,
+                    payload={
+                        "error": (
+                            "At most two execution submissions are allowed per "
+                            "interaction turn"
+                        )
+                    },
+                )
+            except (WaitNotFound, SignalIdempotencyConflict, ValueError):
+                return ToolResult(
+                    success=False,
+                    payload={"error": "Workflow signal was rejected"},
                 )
         if name == "send_message_to_user":
             return send_message_to_user(
