@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from server.services.task_queue import (
     AdmissionRejected,
     FailureCode,
+    IdempotencyConflict,
     MissingScope,
     PostgresTaskLedger,
     Principal,
@@ -184,6 +185,36 @@ async def test_expired_final_attempt_is_dead_lettered_without_attempt_four(
 
 
 @pytest.mark.asyncio
+async def test_lowered_attempt_budget_dead_letters_already_exhausted_queue(
+    postgres_pool: asyncpg.Pool,
+) -> None:
+    original_policy = PostgresTaskLedger(postgres_pool, max_attempts=4)
+    await original_policy.migrate()
+    principal = _principal("tenant-a")
+    accepted = await original_policy.submit(principal, _command(1))
+    failure = TaskFailure(code=FailureCode.SYNTHETIC_RETRYABLE)
+    for attempt in (1, 2, 3):
+        lease = await original_policy.claim(
+            f"worker-{attempt}",
+            timedelta(minutes=1),
+        )
+        assert lease is not None
+        requeued = await original_policy.fail(lease, failure)
+        assert requeued.status == "queued"
+
+    lowered_policy = PostgresTaskLedger(postgres_pool, max_attempts=3)
+
+    assert await lowered_policy.claim("worker-4", timedelta(minutes=1)) is None
+    reconciled = await lowered_policy.get(
+        principal.tenant_id,
+        accepted.task_id,
+    )
+    assert reconciled is not None
+    assert reconciled.status == "dead_lettered"
+    assert reconciled.failure == FailureCode.ATTEMPTS_EXHAUSTED
+
+
+@pytest.mark.asyncio
 async def test_expired_worker_cannot_report_failure_after_reclaim(
     postgres_pool: asyncpg.Pool,
 ) -> None:
@@ -255,6 +286,101 @@ async def test_cancellation_releases_tenant_admission_capacity(
     assert cancelled is not None
     assert cancelled.status == "cancelled"
     assert replacement.status == "queued"
+
+
+@pytest.mark.asyncio
+async def test_submit_handles_conflict_from_legacy_writer_during_rollout(
+    postgres_pool: asyncpg.Pool,
+) -> None:
+    ledger = PostgresTaskLedger(postgres_pool)
+    await ledger.migrate()
+    principal = _principal("tenant-a")
+    command = SubmitTask(
+        idempotency_key="rollout-conflict",
+        origin_turn_id="new-turn",
+        agent_name="slow-new",
+        input={"writer": "new"},
+    )
+    lock_namespace = 1_011_334_821
+    lock_key = 77
+    await postgres_pool.execute(
+        f"""
+        CREATE FUNCTION pause_new_writer() RETURNS trigger AS $$
+        BEGIN
+            IF NEW.agent_name = 'slow-new' THEN
+                PERFORM pg_advisory_xact_lock(
+                    {lock_namespace},
+                    {lock_key}
+                );
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER pause_new_writer
+        BEFORE INSERT ON execution_tasks
+        FOR EACH ROW EXECUTE FUNCTION pause_new_writer();
+        """
+    )
+
+    async with postgres_pool.acquire() as blocker:
+        await blocker.execute(
+            "SELECT pg_advisory_lock($1, $2)",
+            lock_namespace,
+            lock_key,
+        )
+        submission = asyncio.create_task(ledger.submit(principal, command))
+        try:
+            for _ in range(100):
+                waiting = await postgres_pool.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_locks
+                        WHERE locktype = 'advisory'
+                          AND classid = $1::oid
+                          AND objid = $2::oid
+                          AND NOT granted
+                    )
+                    """,
+                    lock_namespace,
+                    lock_key,
+                )
+                if waiting:
+                    break
+                await asyncio.sleep(0.01)
+            assert waiting
+
+            await postgres_pool.execute(
+                """
+                INSERT INTO execution_tasks (
+                    tenant_id,
+                    actor_id,
+                    idempotency_key,
+                    request_fingerprint,
+                    origin_turn_id,
+                    agent_name,
+                    input
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                """,
+                principal.tenant_id,
+                "legacy-user",
+                command.idempotency_key,
+                "legacy-fingerprint",
+                "legacy-turn",
+                "legacy-agent",
+                "{}",
+            )
+        finally:
+            await blocker.execute(
+                "SELECT pg_advisory_unlock($1, $2)",
+                lock_namespace,
+                lock_key,
+            )
+
+    with pytest.raises(IdempotencyConflict):
+        await submission
 
 
 @pytest.mark.asyncio

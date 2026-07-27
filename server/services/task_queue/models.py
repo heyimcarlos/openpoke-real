@@ -26,6 +26,7 @@ class FailureCode(str, Enum):
     SYNTHETIC_RETRYABLE = "synthetic_retryable"
     SYNTHETIC_NON_RETRYABLE = "synthetic_non_retryable"
     LEASE_EXPIRED = "lease_expired"
+    ATTEMPTS_EXHAUSTED = "attempts_exhausted"
 
 
 class TaskFailure(BaseModel):

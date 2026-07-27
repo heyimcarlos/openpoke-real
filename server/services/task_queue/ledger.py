@@ -171,6 +171,7 @@ class PostgresTaskLedger:
                         input
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                    ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
                     RETURNING *
                     """,
                     principal.tenant_id,
@@ -181,6 +182,24 @@ class PostgresTaskLedger:
                     command.agent_name,
                     serialized_input,
                 )
+                if row is None:
+                    row = await connection.fetchrow(
+                        """
+                        SELECT *
+                        FROM execution_tasks
+                        WHERE tenant_id = $1 AND idempotency_key = $2
+                        """,
+                        principal.tenant_id,
+                        command.idempotency_key,
+                    )
+                    if row is None:
+                        raise RuntimeError(
+                            "conflicting task acceptance record disappeared"
+                        )
+                    if row["request_fingerprint"] != fingerprint:
+                        raise IdempotencyConflict(
+                            "idempotency key already identifies different task input"
+                        )
 
         if row is None:
             raise RuntimeError("task acceptance did not return a durable record")
@@ -244,6 +263,18 @@ class PostgresTaskLedger:
                         lease_expires_at = NULL
                     WHERE status = 'running'
                       AND lease_expires_at <= clock_timestamp()
+                      AND attempt_count >= $1
+                    """,
+                    self._max_attempts,
+                )
+                await connection.execute(
+                    """
+                    UPDATE execution_tasks
+                    SET status = 'dead_lettered',
+                        failure_code = 'attempts_exhausted',
+                        lease_owner = NULL,
+                        lease_expires_at = NULL
+                    WHERE status = 'queued'
                       AND attempt_count >= $1
                     """,
                     self._max_attempts,
