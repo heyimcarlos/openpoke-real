@@ -194,6 +194,17 @@ async def test_exact_signal_releases_only_published_route_and_replays(
     assert accepted.wait.status.value == "satisfied"
     assert accepted.wait.satisfied_by_signal_id == accepted.signal_id
     assert len(accepted.released_step_ids) == 1
+    assert await postgres_pool.fetchval(
+        """
+        SELECT count(*)
+        FROM task_wake_outbox AS wake
+        JOIN workflow_steps AS step
+          ON step.execution_task_id = wake.task_id
+        WHERE step.step_id = $1
+          AND wake.source_transition = 'signal_released'
+        """,
+        accepted.released_step_ids[0],
+    ) == 1
     send = await ledger.claim("worker-2", timedelta(seconds=30))
     assert send is not None
     assert send.agent_name == "send"

@@ -11,7 +11,14 @@ from uuid import UUID
 
 from .execution import ExecutionFailure, ExecutorRegistry, UnknownExecutor
 from .ledger import PostgresTaskLedger, StaleLease
-from .models import FailureCode, TaskFailure, TaskLease, TaskRecord, TaskStatus
+from .models import (
+    ExecutorKind,
+    FailureCode,
+    TaskFailure,
+    TaskLease,
+    TaskRecord,
+    TaskStatus,
+)
 
 
 class WorkerOutcomeStatus(str, Enum):
@@ -59,10 +66,15 @@ class TaskWorker:
         self._projection_timeout_seconds = projection_timeout_seconds
         self._result_sink = result_sink
 
-    async def run_once(self) -> WorkerOutcome:
+    async def run_once(
+        self,
+        *,
+        executor_kind: ExecutorKind | None = None,
+    ) -> WorkerOutcome:
         lease = await self._ledger.claim(
             self._worker_id,
             self._lease_duration,
+            executor_kind=executor_kind,
         )
         if lease is None:
             return WorkerOutcome(status=WorkerOutcomeStatus.IDLE)

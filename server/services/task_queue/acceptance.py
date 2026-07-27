@@ -210,6 +210,7 @@ class TaskAdmission:
                 origin_agent_run_id,
                 initial_status.value,
             )
+        accepted_new = row is not None
         if row is None:
             row = await connection.fetchrow(
                 """
@@ -226,6 +227,15 @@ class TaskAdmission:
                 raise IdempotencyConflict(
                     "idempotency key already identifies different task input"
                 )
+        if accepted_new and initial_status is TaskStatus.QUEUED:
+            from .outbox import append_task_wake
+
+            await append_task_wake(
+                connection,
+                task_id=row["task_id"],
+                executor_kind=command.executor_kind,
+                source_transition="accepted",
+            )
         return task_from_row(row)
 
     async def get(

@@ -84,8 +84,12 @@ async def advance_workflow_for_task(
     )
     released = await connection.fetch(
         """
-        SELECT candidate.step_id, candidate.execution_task_id
+        SELECT candidate.step_id,
+               candidate.execution_task_id,
+               task.executor_kind
         FROM workflow_steps AS candidate
+        JOIN execution_tasks AS task
+          ON task.task_id = candidate.execution_task_id
         WHERE candidate.instance_id = $1
           AND candidate.status = 'blocked'
           AND NOT EXISTS (
@@ -131,6 +135,14 @@ async def advance_workflow_for_task(
         )
         if task_update != "UPDATE 1":
             raise RuntimeError("blocked Workflow task could not be released")
+        from ..task_queue.outbox import append_task_wake
+
+        await append_task_wake(
+            connection,
+            task_id=candidate["execution_task_id"],
+            executor_kind=candidate["executor_kind"],
+            source_transition="dependency_released",
+        )
 
     remaining = await connection.fetchval(
         """

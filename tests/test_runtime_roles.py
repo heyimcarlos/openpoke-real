@@ -17,6 +17,7 @@ from server.database import DatabaseRole, create_role_pool
         (DatabaseRole.API, 5),
         (DatabaseRole.ORCHESTRATOR, 4),
         (DatabaseRole.WORKER, 4),
+        (DatabaseRole.RELAY, 2),
         (DatabaseRole.MIGRATOR, 1),
     ],
 )
@@ -79,6 +80,7 @@ def test_worker_cli_wires_local_projection_mode(
         ("server.server", "OpenPoke FastAPI server"),
         ("server.worker", "--no-local-result-projection"),
         ("server.orchestrator_worker", "OpenPoke orchestrator worker"),
+        ("server.outbox_relay", "Relay PostgreSQL task wakes"),
         ("server.migrate", "Apply OpenPoke database migrations"),
     ],
 )
@@ -117,3 +119,33 @@ def test_worker_rejects_capacity_above_two_slots() -> None:
 
     assert result.returncode == 2
     assert "--concurrency must be 1 or 2" in result.stderr
+
+
+@pytest.mark.asyncio
+async def test_broker_startup_failure_retries_without_stopping_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RetryObserved(Exception):
+        pass
+
+    async def unavailable(*args: object, **kwargs: object):
+        raise ConnectionError("broker unavailable")
+
+    async def stop_after_retry(seconds: float) -> None:
+        assert seconds == 5
+        raise RetryObserved
+
+    monkeypatch.setattr(
+        worker_module.RabbitMQWakeBroker,
+        "connect",
+        unavailable,
+    )
+    monkeypatch.setattr(worker_module.asyncio, "sleep", stop_after_retry)
+
+    with pytest.raises(RetryObserved):
+        await worker_module._broker_consumer_loop(
+            rabbitmq_url="amqp://unavailable",
+            wake_handler=object(),
+            executor_kinds=(worker_module.ExecutorKind.SYNTHETIC,),
+            concurrency=2,
+        )
