@@ -37,6 +37,8 @@ class InteractionResultSink:
     async def __call__(self, record: TaskRecord) -> None:
         if record.executor_kind is not ExecutorKind.AGENT:
             return
+        if record.origin_thread_id is not None:
+            return
         if record.status is not TaskStatus.COMPLETED or record.result is None:
             raise ValueError("only completed tasks can be projected")
         response = record.result.get("response")

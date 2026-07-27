@@ -127,6 +127,8 @@ class TaskRecord:
     attempt_count: int
     failure: FailureCode | None
     created_at: datetime
+    origin_thread_id: UUID | None = None
+    origin_agent_run_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -142,3 +144,5 @@ class TaskLease:
     lease_generation: int
     worker_id: str
     expires_at: datetime
+    origin_thread_id: UUID | None = None
+    origin_agent_run_id: UUID | None = None

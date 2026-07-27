@@ -15,6 +15,11 @@ from ...services.task_queue import (
     SubmitTask,
     TaskService,
 )
+from ...services.threads import (
+    AgentRunLease,
+    DelegationLimitReached,
+    PostgresThreadLedger,
+)
 
 
 @dataclass
@@ -34,6 +39,9 @@ class InteractionToolContext:
     principal: Principal
     origin_turn_id: str
     task_service: TaskService
+    thread_ledger: PostgresThreadLedger | None = None
+    run_lease: AgentRunLease | None = None
+    persist_locally: bool = True
 
 
 # Tool schemas for OpenRouter
@@ -147,19 +155,27 @@ async def delegate_execution(
         "delegation:"
         + hashlib.sha256(semantic_delegation.encode("utf-8")).hexdigest()
     )
-    accepted = await context.task_service.submit(
-        context.principal,
-        SubmitTask(
-            idempotency_key=idempotency_key,
-            origin_turn_id=context.origin_turn_id,
-            agent_name=agent_name,
-            executor_kind=ExecutorKind.AGENT,
-            input={
-                "instructions": instructions,
-                "composio_user_id": context.principal.composio_user_id,
-            },
-        ),
+    command = SubmitTask(
+        idempotency_key=idempotency_key,
+        origin_turn_id=context.origin_turn_id,
+        agent_name=agent_name,
+        executor_kind=ExecutorKind.AGENT,
+        input={
+            "instructions": instructions,
+            "composio_user_id": context.principal.composio_user_id,
+        },
     )
+    if context.thread_ledger is not None and context.run_lease is not None:
+        accepted = await context.thread_ledger.submit_delegation(
+            context.run_lease,
+            context.principal,
+            command,
+        )
+    else:
+        accepted = await context.task_service.submit(
+            context.principal,
+            command,
+        )
 
     roster = get_agent_roster()
     roster.load()
@@ -183,10 +199,11 @@ async def delegate_execution(
 
 
 # Send immediate message to user and record in conversation history
-def send_message_to_user(message: str) -> ToolResult:
+def send_message_to_user(message: str, *, persist_locally: bool = True) -> ToolResult:
     """Record a user-visible reply in the conversation log."""
-    log = get_conversation_log()
-    log.record_reply(message)
+    if persist_locally:
+        log = get_conversation_log()
+        log.record_reply(message)
 
     return ToolResult(
         success=True,
@@ -201,13 +218,15 @@ def send_draft(
     to: str,
     subject: str,
     body: str,
+    *,
+    persist_locally: bool = True,
 ) -> ToolResult:
     """Record a draft update in the conversation log for the interaction agent."""
-    log = get_conversation_log()
-
     message = f"To: {to}\nSubject: {subject}\n\n{body}"
 
-    log.record_reply(message)
+    if persist_locally:
+        log = get_conversation_log()
+        log.record_reply(message)
     logger.info(f"Draft recorded for: {to}")
 
     return ToolResult(
@@ -217,18 +236,17 @@ def send_draft(
             "to": to,
             "subject": subject,
         },
+        user_message=message,
         recorded_reply=True,
     )
 
 
 # Record silent wait state to avoid duplicate responses
-def wait(reason: str) -> ToolResult:
+def wait(reason: str, *, persist_locally: bool = True) -> ToolResult:
     """Wait silently and add a wait log entry that is not visible to the user."""
-    log = get_conversation_log()
-    
-    # Record a dedicated wait entry so the UI knows to ignore it
-    log.record_wait(reason)
-    
+    if persist_locally:
+        log = get_conversation_log()
+        log.record_wait(reason)
 
     return ToolResult(
         success=True,
@@ -278,12 +296,31 @@ async def handle_tool_call(
                         "retry_after_seconds": exc.retry_after_seconds,
                     },
                 )
+            except DelegationLimitReached:
+                return ToolResult(
+                    success=False,
+                    payload={
+                        "error": (
+                            "At most two execution delegations are allowed per "
+                            "interaction turn"
+                        )
+                    },
+                )
         if name == "send_message_to_user":
-            return send_message_to_user(**args)
+            return send_message_to_user(
+                **args,
+                persist_locally=context is None or context.persist_locally,
+            )
         if name == "send_draft":
-            return send_draft(**args)
+            return send_draft(
+                **args,
+                persist_locally=context is None or context.persist_locally,
+            )
         if name == "wait":
-            return wait(**args)
+            return wait(
+                **args,
+                persist_locally=context is None or context.persist_locally,
+            )
 
         logger.warning("unexpected tool", extra={"tool": name})
         return ToolResult(success=False, payload={"error": f"Unknown tool: {name}"})

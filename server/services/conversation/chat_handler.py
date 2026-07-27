@@ -1,14 +1,12 @@
-import asyncio
 from typing import Optional, Union
 
 from fastapi import status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
-from ...agents.interaction_agent.runtime import InteractionAgentRuntime
-from ...agents.interaction_agent.tools import InteractionToolContext
 from ...logging_config import logger
 from ...models import ChatMessage, ChatRequest
-from ..task_queue import Principal, TaskService
+from ..task_queue import Principal
+from ..threads import PostgresThreadLedger
 from ...utils import error_response
 
 
@@ -25,9 +23,9 @@ async def handle_chat_request(
     payload: ChatRequest,
     *,
     principal: Principal,
-    task_service: TaskService,
+    thread_ledger: PostgresThreadLedger,
 ) -> Union[PlainTextResponse, JSONResponse]:
-    """Handle a chat request using the InteractionAgentRuntime."""
+    """Durably accept one inbound chat message for later orchestration."""
 
     # Extract user message
     user_message = _extract_latest_user_message(payload)
@@ -38,25 +36,10 @@ async def handle_chat_request(
 
     logger.info("chat request", extra={"message_length": len(user_content)})
 
-    try:
-        runtime = InteractionAgentRuntime(
-            tool_context=InteractionToolContext(
-                principal=principal,
-                origin_turn_id=payload.turn_id,
-                task_service=task_service,
-            )
-        )
-    except ValueError as ve:
-        # Missing API key error
-        logger.error("configuration error", extra={"error": str(ve)})
-        return error_response(str(ve), status_code=status.HTTP_400_BAD_REQUEST)
-
-    async def _run_interaction() -> None:
-        try:
-            await runtime.execute(user_message=user_content)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.error("chat task failed", extra={"error": str(exc)})
-
-    asyncio.create_task(_run_interaction())
+    await thread_ledger.append_message(
+        principal,
+        message_id=payload.turn_id,
+        content=user_content,
+    )
 
     return PlainTextResponse("", status_code=status.HTTP_202_ACCEPTED)
