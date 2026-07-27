@@ -1,0 +1,30 @@
+[project]
+name = "openpoke"
+version = "0.3.0"
+description = "Open-source multi-agent personal assistant"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+    "asyncpg>=0.29.0,<1.0.0",
+    "beautifulsoup4>=4.12.0,<5.0.0",
+    "composio>=0.5.0,<1.0.0",
+    "fastapi>=0.115.0,<1.0.0",
+    "httpx>=0.27.0,<1.0.0",
+    "pydantic>=2.7.0,<3.0.0",
+    "pyjwt>=2.9.0,<3.0.0",
+    "python-dateutil>=2.9.0,<3.0.0",
+    "uvicorn[standard]>=0.30.0,<1.0.0",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0,<9.0.0",
+    "pytest-asyncio>=0.24.0,<2.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = ["--strict-markers"]
