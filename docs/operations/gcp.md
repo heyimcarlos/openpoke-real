@@ -23,7 +23,17 @@ Chat history, the interaction orchestrator, the scheduler, and the watcher still
 have process-local or file-backed state. Run one API replica until those
 components become tenant-scoped and durable.
 
-### Single-day GCP target
+The current result sink also projects a completed agent result into local
+conversation files. This works for the local browser demonstration because the
+API and worker share a filesystem. It does not cross a Cloud Run service
+boundary.
+
+Run that local browser demonstration with one worker slot. File-backed
+projection is not durably ordered, so concurrent completions for one
+conversation can reason from stale transcript snapshots. Issue #8 replaces this
+compatibility path with one serialized durable Agent Run per Thread.
+
+### Single-day GCP control-plane target
 
 ```text
 IAM-authenticated internal caller
@@ -43,13 +53,19 @@ different commands:
 
 ```text
 API:      .venv/bin/python -m server.server --host 0.0.0.0 --port 8080
-Worker:   .venv/bin/python -m server.worker --concurrency 2
+Worker:   .venv/bin/python -m server.worker --concurrency 2 --no-local-result-projection
 Migrator: .venv/bin/python -m server.migrate
 ```
 
 The initial API service accepts only IAM-authenticated internal traffic because
 several existing Gmail routes do not yet enforce end-user authentication.
 Worker pools have no public HTTP ingress. Cloud SQL has no public IP.
+
+This topology proves durable task acceptance, bounded claims, recovery, and a
+fenced result in PostgreSQL. It is not yet a complete web-message deployment.
+The worker flag prevents it from writing a reply into an ephemeral filesystem.
+Issue #8 must persist tenant Threads and Agent Runs before a separate worker can
+publish a result that the API and UI can observe after either service restarts.
 
 ### Ideal growth path
 
@@ -75,18 +91,43 @@ PostgreSQL remains authoritative. RabbitMQ wakes workers but does not decide
 task state or workflow order. The durable workflow kernel owns definitions,
 instances, steps, attempts, waits, signals, and dependency transitions.
 
+The API authenticates and persists messages. A disposable interaction
+orchestrator may answer directly, submit bounded independent work, or start a
+published Workflow with typed inputs. The deterministic workflow kernel decides
+which Steps are runnable. Execution workers run deterministic code or an Agents
+SDK reasoning executor, while specialist-agent coordination remains inside one
+leased reasoning Step.
+
+The current two-delegation interaction limit is process-local protection, not a
+durable per-turn invariant. A duplicate or concurrent delivery of one turn can
+run the interaction model again. The PostgreSQL tenant and global caps remain
+authoritative. Issue #8 moves turn idempotency and the delegation budget into
+one durable Agent Run.
+
 ## Capacity and connection budget
+
+The initial one-API deployment has this maximum connection budget:
+
+| Role | Initial instances | Pool per instance | Maximum connections |
+| --- | ---: | ---: | ---: |
+| API | 1 | 5 | 5 |
+| Worker | 4 | 4 | 16 |
+| Migrator Job | 1 | 1 | 1 |
+| Initial maximum | | | 22 |
+
+After issue #8 externalizes chat and orchestrator state, the approved capacity
+envelope becomes:
 
 | Role | Instance envelope | Pool per instance | Maximum connections |
 | --- | ---: | ---: | ---: |
 | API | 4 | 5 | 20 |
 | Worker | 4 | 4 | 16 |
 | Migrator Job | 1 | 1 | 1 |
-| Total | | | 37 |
+| Post-#8 maximum | | | 37 |
 
-The application operating budget is 50 connections, leaving 13 for operational
-headroom. Cloud SQL system connections and administrator access need a separate
-instance-level allowance.
+The application operating budget is 50 connections. The initial maximum leaves
+28 connections of headroom. The post-#8 envelope leaves 13. Cloud SQL system
+connections and administrator access need a separate instance-level allowance.
 
 The initial API deployment has one replica because chat and scheduler state are
 not safe for multiple replicas. Four API replicas are the connection-budget
@@ -104,7 +145,7 @@ Use four service accounts:
 | API | connect as API database user, read API-scoped Secret Manager versions | DDL, worker secrets, deployment, unauthenticated public ingress |
 | Worker | connect as worker database user, read execution provider and tool secrets | DDL, public ingress, deployment |
 | Migrator | connect as migration database owner for the migration Job | provider secrets, serving traffic |
-| Deployer | push/read release images, deploy approved revisions, act as the three runtime identities | runtime secret values, database login |
+| Deployer | push/read release images, deploy approved revisions, act as the three runtime identities | direct database login |
 
 GitHub deployment authentication should use Workload Identity Federation, not a
 stored service-account key. Runtime secret values are Secret Manager references,
@@ -112,6 +153,17 @@ not image layers, source files, CI variables, or command-line arguments. Cloud
 Run encryption at rest, Secret Manager encryption, Cloud SQL encryption at rest,
 and encrypted database connections cover the managed transport and storage
 boundaries.
+
+The deployer is privileged. Its ability to deploy code as a runtime identity
+means it could deploy code that reads that identity's secrets. Production
+separation requires protected deployment environments and human approval of the
+recorded image digest. A later hardening step can require signed artifacts and a
+separate identity that only promotes an approved digest.
+
+Production database connections must use the Cloud SQL Auth Proxy or a Cloud SQL
+connector over private IP. The proxy or connector verifies the instance and
+encrypts its upstream connection. A raw external PostgreSQL DSN without verified
+TLS is not an approved production configuration.
 
 The current HS256 JWT verifier shares signing material. Production should verify
 asymmetric tokens from an identity provider's JWKS so the API never holds the
@@ -129,8 +181,9 @@ token issuer's signing key.
 6. Deploy the private worker pool command at the same digest, with two slots per
    instance.
 7. Submit an authenticated synthetic task and confirm acceptance, claim, fenced
-   completion, projection, queue depth, oldest runnable age, and database
-   connection use.
+   completion in PostgreSQL, queue depth, oldest runnable age, and database
+   connection use. Test browser-visible result delivery separately only after
+   issue #8 supplies durable Threads and Agent Runs.
 
 Do not automatically roll back database migrations. If application verification
 fails, stop or roll back the API and worker revisions only when the previous

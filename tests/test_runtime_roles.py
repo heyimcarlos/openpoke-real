@@ -46,7 +46,7 @@ async def test_runtime_role_uses_its_connection_budget(
     ("module", "expected_help"),
     [
         ("server.server", "OpenPoke FastAPI server"),
-        ("server.worker", "--concurrency"),
+        ("server.worker", "--no-local-result-projection"),
         ("server.migrate", "Apply OpenPoke database migrations"),
     ],
 )
