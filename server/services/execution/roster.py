@@ -1,4 +1,4 @@
-"""Simple agent roster management - just a list of agent names."""
+"""File-backed names for reusable logical execution contexts."""
 
 import json
 import fcntl
@@ -9,7 +9,7 @@ from ...logging_config import logger
 
 
 class AgentRoster:
-    """Simple roster that stores agent names in a JSON file."""
+    """Store logical context names, not resident agent processes."""
 
     def __init__(self, roster_path: Path):
         self._roster_path = roster_path

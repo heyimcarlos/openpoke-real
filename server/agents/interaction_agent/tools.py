@@ -41,8 +41,12 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "send_message_to_agent",
-            "description": "Deliver instructions to a specific execution agent. Creates a new agent if the name doesn't exist in the roster, or reuses an existing one.",
+            "name": "delegate_execution",
+            "description": (
+                "Durably delegate one complete objective to an execution agent. "
+                "The name identifies a reusable logical context from the visible "
+                "roster, not a resident process or immediate compute allocation."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -121,7 +125,7 @@ TOOL_SCHEMAS = [
     },
 ]
 
-async def send_message_to_agent(
+async def delegate_execution(
     agent_name: str,
     instructions: str,
     *,
@@ -165,7 +169,7 @@ async def send_message_to_agent(
         roster.add_agent(agent_name)
 
     action = "Created" if is_new else "Reused"
-    logger.info(f"{action} agent: {agent_name}")
+    logger.info(f"{action} execution context: {agent_name}")
 
     return ToolResult(
         success=True,
@@ -173,7 +177,7 @@ async def send_message_to_agent(
             "status": "submitted",
             "task_id": accepted.task_id,
             "agent_name": agent_name,
-            "new_agent_created": is_new,
+            "new_context_created": is_new,
         },
     )
 
@@ -258,14 +262,14 @@ async def handle_tool_call(
         else:
             return ToolResult(success=False, payload={"error": "Invalid arguments format"})
 
-        if name == "send_message_to_agent":
+        if name == "delegate_execution":
             if context is None:
                 return ToolResult(
                     success=False,
                     payload={"error": "Execution context is unavailable"},
                 )
             try:
-                return await send_message_to_agent(**args, context=context)
+                return await delegate_execution(**args, context=context)
             except AdmissionRejected as exc:
                 return ToolResult(
                     success=False,

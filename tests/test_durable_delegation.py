@@ -1,43 +1,92 @@
 from __future__ import annotations
 
-import asyncio
+import json
+from types import SimpleNamespace
 
 import pytest
 
+from server.agents.interaction_agent.agent import build_system_prompt
+from server.agents.interaction_agent.runtime import InteractionAgentRuntime
 from server.agents.interaction_agent.tools import (
     InteractionToolContext,
+    delegate_execution,
     get_tool_schemas,
-    send_message_to_agent,
+    handle_tool_call,
 )
 from server.services.task_queue import (
+    AdmissionRejected,
     ExecutorKind,
     PostgresTaskLedger,
     Principal,
     TaskService,
 )
 
+PRINCIPAL = Principal(
+    actor_id="user-7",
+    tenant_id="tenant-a",
+    scopes=frozenset({"tasks:create"}),
+)
+
+
+@pytest.fixture
+def isolated_roster(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    agents: list[str] = []
+    roster = SimpleNamespace(
+        load=lambda: None,
+        get_agents=lambda: list(agents),
+        add_agent=lambda name: agents.append(name),
+    )
+    monkeypatch.setattr(
+        "server.agents.interaction_agent.tools.get_agent_roster",
+        lambda: roster,
+    )
+    monkeypatch.setattr(
+        "server.agents.interaction_agent.agent.get_agent_roster",
+        lambda: roster,
+    )
+    return agents
+
+
+def _tool_call(identifier: str, **arguments: str) -> dict:
+    return {
+        "id": identifier,
+        "function": {
+            "name": "delegate_execution",
+            "arguments": json.dumps(arguments),
+        },
+    }
+
+
+def _provider_response(*tool_calls: dict, content: str = "") -> dict:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "content": content,
+                    "tool_calls": list(tool_calls),
+                }
+            }
+        ]
+    }
+
 
 @pytest.mark.asyncio
 async def test_delegation_awaits_durable_tenant_owned_acceptance(
     ledger: PostgresTaskLedger,
+    isolated_roster: list[str],
 ) -> None:
-    principal = Principal(
-        actor_id="user-7",
-        tenant_id="tenant-a",
-        scopes=frozenset({"tasks:create"}),
-    )
     context = InteractionToolContext(
-        principal=principal,
+        principal=PRINCIPAL,
         origin_turn_id="turn-client-stable-7",
         task_service=TaskService(ledger),
     )
 
-    result = await send_message_to_agent(
+    result = await delegate_execution(
         "Invoice Search Team",
         "find the latest invoice",
         context=context,
     )
-    replay = await send_message_to_agent(
+    replay = await delegate_execution(
         "Invoice Search Team",
         "find the latest invoice",
         context=context,
@@ -45,11 +94,11 @@ async def test_delegation_awaits_durable_tenant_owned_acceptance(
 
     assert result.success
     assert result.payload["status"] == "submitted"
+    assert result.payload["new_context_created"] is True
     assert result.payload["task_id"] == replay.payload["task_id"]
-    accepted = await ledger.get(
-        "tenant-a",
-        result.payload["task_id"],
-    )
+    assert replay.payload["new_context_created"] is False
+    assert isolated_roster == ["Invoice Search Team"]
+    accepted = await ledger.get("tenant-a", result.payload["task_id"])
     assert accepted is not None
     assert accepted.actor_id == "user-7"
     assert accepted.origin_turn_id == "turn-client-stable-7"
@@ -60,50 +109,149 @@ async def test_delegation_awaits_durable_tenant_owned_acceptance(
     }
 
 
-@pytest.mark.asyncio
-async def test_delegation_does_not_report_submitted_before_acceptance() -> None:
-    release = asyncio.Event()
-    started = asyncio.Event()
-
-    class DelayedTaskService:
-        async def submit(self, principal, command):
-            started.set()
-            await release.wait()
-            return type("Accepted", (), {"task_id": "task-7"})()
-
-    context = InteractionToolContext(
-        principal=Principal(
-            actor_id="user-7",
-            tenant_id="tenant-a",
-            scopes=frozenset({"tasks:create"}),
-        ),
-        origin_turn_id="turn-7",
-        task_service=DelayedTaskService(),
-    )
-
-    submission = asyncio.create_task(
-        send_message_to_agent(
-            "invoice-search",
-            "find invoices",
-            context=context,
-        )
-    )
-    await started.wait()
-
-    assert not submission.done()
-    release.set()
-    result = await submission
-    assert result.payload["status"] == "submitted"
-
-
-def test_model_visible_delegation_schema_cannot_choose_executor_policy() -> None:
+def test_model_contract_describes_one_bounded_delegation() -> None:
     delegation = next(
         schema["function"]
         for schema in get_tool_schemas()
-        if schema["function"]["name"] == "send_message_to_agent"
+        if schema["function"]["name"] == "delegate_execution"
     )
 
     assert set(delegation["parameters"]["properties"]) == {
         "agent_name",
         "instructions",
     }
+    assert "logical context" in delegation["description"]
+    assert "process" in delegation["description"]
+    prompt = build_system_prompt()
+    assert "at most one durable delegation per interaction turn" in prompt
+    assert "complete objective" in prompt
+    assert "parallel as much as possible" not in prompt
+    assert "send_message_to_agent" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_does_not_update_roster_when_admission_fails(
+    isolated_roster: list[str],
+) -> None:
+    class RejectingTaskService:
+        async def submit(self, _principal, _command):
+            raise AdmissionRejected(retry_after_seconds=10)
+
+    result = await handle_tool_call(
+        "delegate_execution",
+        {
+            "agent_name": "invoice-search",
+            "instructions": "find invoices",
+        },
+        context=InteractionToolContext(
+            principal=PRINCIPAL,
+            origin_turn_id="turn-7",
+            task_service=RejectingTaskService(),
+        ),
+    )
+
+    assert not result.success
+    assert result.payload == {
+        "error": "Execution backlog is full",
+        "retry_after_seconds": 10,
+    }
+    assert isolated_roster == []
+
+
+@pytest.mark.asyncio
+async def test_interaction_turn_accepts_only_one_delegation(
+    ledger: PostgresTaskLedger,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_roster: list[str],
+) -> None:
+    class CountingTaskService:
+        def __init__(self) -> None:
+            self.submissions = 0
+            self.service = TaskService(ledger)
+
+        async def submit(self, principal, command):
+            self.submissions += 1
+            return await self.service.submit(principal, command)
+
+    responses = [
+        _provider_response(
+            _tool_call(
+                "first",
+                agent_name="invoices",
+                instructions="find the invoice",
+            ),
+            _tool_call(
+                "second",
+                agent_name="calendar",
+                instructions="book a follow-up",
+            ),
+        ),
+        _provider_response(content="I started that."),
+        _provider_response(
+            _tool_call(
+                "next-turn",
+                agent_name="calendar",
+                instructions="book a follow-up",
+            )
+        ),
+        _provider_response(content="I started that."),
+    ]
+    provider_messages: list[list[dict]] = []
+
+    async def fake_request_chat_completion(**kwargs):
+        provider_messages.append(kwargs["messages"])
+        return responses.pop(0)
+
+    log = SimpleNamespace(
+        record_user_message=lambda _message: None,
+        record_reply=lambda _message: None,
+        load_transcript=lambda: "",
+    )
+    monkeypatch.setattr(
+        "server.agents.interaction_agent.runtime.get_settings",
+        lambda: SimpleNamespace(
+            openrouter_api_key="test-only",
+            interaction_agent_model="test-model",
+            summarization_enabled=False,
+        ),
+    )
+    for dependency in ("get_conversation_log", "get_working_memory_log"):
+        monkeypatch.setattr(
+            f"server.agents.interaction_agent.runtime.{dependency}",
+            lambda: log,
+        )
+    monkeypatch.setattr(
+        "server.agents.interaction_agent.runtime.request_chat_completion",
+        fake_request_chat_completion,
+    )
+
+    task_service = CountingTaskService()
+    runtime = InteractionAgentRuntime(
+        tool_context=InteractionToolContext(
+            principal=PRINCIPAL,
+            origin_turn_id="turn-7",
+            task_service=task_service,
+        )
+    )
+
+    result = await runtime.execute("Find the invoice and book a follow-up")
+
+    assert result.success
+    assert result.execution_agents_used == 1
+    assert task_service.submissions == 1
+    tool_results = [
+        json.loads(message["content"])
+        for message in provider_messages[1]
+        if message["role"] == "tool"
+    ]
+    assert tool_results[0]["status"] == "success"
+    assert tool_results[1]["status"] == "error"
+    assert (
+        tool_results[1]["error"]["error"]
+        == "Only one execution delegation is allowed per interaction turn"
+    )
+
+    next_result = await runtime.execute("Now book the follow-up")
+
+    assert next_result.success
+    assert task_service.submissions == 2
