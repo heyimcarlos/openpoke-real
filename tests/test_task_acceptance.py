@@ -3,13 +3,11 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import datetime, timedelta, timezone
-from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 import asyncpg
 import jwt
 import pytest
-import pytest_asyncio
 from pydantic import ValidationError
 
 from server.services.task_queue import (
@@ -30,37 +28,24 @@ DATABASE_URL = os.getenv(
 SIGNING_KEY = "test-only-signing-key-with-at-least-32-bytes"
 
 
-def _require_disposable_test_database(database_url: str) -> None:
-    database_name = unquote(urlparse(database_url).path).lstrip("/")
-    if not database_name.startswith("test_") and not database_name.endswith("_test"):
-        raise RuntimeError(
-            "task-ledger tests require a database named test_* or *_test"
-        )
-
-
-_require_disposable_test_database(DATABASE_URL)
-
-
-@pytest_asyncio.fixture
-async def ledger() -> PostgresTaskLedger:
-    pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=4)
-    task_ledger = PostgresTaskLedger(pool)
-    await pool.execute("DROP TABLE IF EXISTS execution_tasks")
-    await task_ledger.migrate()
-    try:
-        yield task_ledger
-    finally:
-        await pool.close()
+async def _create_pool(
+    schema: str,
+    *,
+    max_size: int = 4,
+) -> asyncpg.Pool:
+    return await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=1,
+        max_size=max_size,
+        server_settings={"search_path": schema},
+    )
 
 
 @pytest.mark.asyncio
 async def test_acceptance_is_durable_and_exact_replay_returns_original_task(
+    database_schema: str,
 ) -> None:
-    accepting_pool = await asyncpg.create_pool(
-        DATABASE_URL,
-        min_size=1,
-        max_size=2,
-    )
+    accepting_pool = await _create_pool(database_schema, max_size=2)
     principal = Principal(
         actor_id="user-7",
         tenant_id="tenant-a",
@@ -74,7 +59,6 @@ async def test_acceptance_is_durable_and_exact_replay_returns_original_task(
     )
     try:
         accepting_ledger = PostgresTaskLedger(accepting_pool)
-        await accepting_pool.execute("DROP TABLE IF EXISTS execution_tasks")
         await accepting_ledger.migrate()
         service = TaskService(accepting_ledger)
         accepted = await service.submit(principal, command)
@@ -82,7 +66,7 @@ async def test_acceptance_is_durable_and_exact_replay_returns_original_task(
     finally:
         await accepting_pool.close()
 
-    restarted_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=2)
+    restarted_pool = await _create_pool(database_schema, max_size=2)
     try:
         recovered = await TaskService(PostgresTaskLedger(restarted_pool)).get(
             principal,

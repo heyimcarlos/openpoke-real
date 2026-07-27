@@ -16,6 +16,8 @@ MAX_TASK_INPUT_BYTES = 16_384
 
 class TaskStatus(str, Enum):
     QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
 
 
 def canonical_json(value: JsonValue) -> str:
@@ -91,3 +93,15 @@ class TaskRecord:
     status: TaskStatus
     result: dict[str, JsonValue] | None
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class TaskLease:
+    task_id: UUID
+    tenant_id: str
+    agent_name: str
+    input: dict[str, JsonValue]
+    attempt_count: int
+    lease_generation: int
+    worker_id: str
+    expires_at: datetime
