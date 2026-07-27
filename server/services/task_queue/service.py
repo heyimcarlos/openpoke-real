@@ -34,6 +34,14 @@ class TaskService:
         _require_scope(principal, "tasks:read")
         return await self._ledger.get(principal.tenant_id, task_id)
 
+    async def cancel(
+        self,
+        principal: Principal,
+        task_id: UUID,
+    ) -> TaskRecord | None:
+        _require_scope(principal, "tasks:cancel")
+        return await self._ledger.cancel(principal.tenant_id, task_id)
+
 
 def _require_scope(principal: Principal, required: str) -> None:
     if required not in principal.scopes:
