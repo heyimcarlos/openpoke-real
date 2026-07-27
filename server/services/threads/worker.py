@@ -16,6 +16,7 @@ from ...agents.interaction_agent.runtime import (
 )
 from ...agents.interaction_agent.tools import InteractionToolContext
 from ..task_queue import Principal, TaskService
+from ..workflows import WorkflowService
 from .ledger import PostgresThreadLedger, StaleAgentRunLease
 from .models import AgentRunLease
 
@@ -50,6 +51,7 @@ class AgentRunWorker:
         self,
         ledger: PostgresThreadLedger,
         task_service: TaskService,
+        workflow_service: WorkflowService | None = None,
         *,
         worker_id: str,
         lease_duration: timedelta = timedelta(seconds=120),
@@ -58,6 +60,7 @@ class AgentRunWorker:
     ) -> None:
         self._ledger = ledger
         self._task_service = task_service
+        self._workflow_service = workflow_service
         self._worker_id = worker_id
         self._lease_duration = lease_duration
         if execution_timeout_seconds <= 0:
@@ -84,7 +87,9 @@ class AgentRunWorker:
         principal = Principal(
             actor_id=lease.actor_id,
             tenant_id=lease.tenant_id,
-            scopes=frozenset({"chat:send", "tasks:create"}),
+            scopes=frozenset(
+                {"chat:send", "tasks:create", "workflows:start"}
+            ),
             composio_user_id=lease.composio_user_id,
         )
         try:
@@ -93,6 +98,7 @@ class AgentRunWorker:
                     principal=principal,
                     origin_turn_id=str(lease.run_id),
                     task_service=self._task_service,
+                    workflow_service=self._workflow_service,
                     thread_ledger=self._ledger,
                     run_lease=lease,
                     persist_locally=False,

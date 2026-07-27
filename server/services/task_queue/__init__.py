@@ -1,9 +1,12 @@
 """Durable, tenant-aware execution task ledger."""
 
 from .auth import InvalidToken, JwtPrincipalVerifier
-from .ledger import (
+from .acceptance import (
     AdmissionRejected,
     IdempotencyConflict,
+    TaskAdmission,
+)
+from .ledger import (
     PostgresTaskLedger,
     StaleLease,
 )
@@ -16,6 +19,7 @@ from .models import (
     TaskLease,
     TaskRecord,
     TaskStatus,
+    canonical_json,
 )
 from .service import MissingScope, TaskService
 
@@ -32,8 +36,10 @@ __all__ = [
     "SubmitTask",
     "StaleLease",
     "TaskFailure",
+    "TaskAdmission",
     "TaskLease",
     "TaskRecord",
     "TaskService",
     "TaskStatus",
+    "canonical_json",
 ]

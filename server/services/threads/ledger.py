@@ -7,12 +7,13 @@ from datetime import timedelta
 
 import asyncpg
 
-from ..task_queue.ledger import (
-    AdmissionRejected,
-    _request_fingerprint,
-    _task_from_row,
+from ..task_queue import (
+    Principal,
+    SubmitTask,
+    TaskAdmission,
+    TaskRecord,
+    canonical_json,
 )
-from ..task_queue.models import Principal, SubmitTask, TaskRecord, canonical_json
 from .models import (
     MAX_MESSAGE_BYTES,
     AgentRunLease,
@@ -47,8 +48,10 @@ class PostgresThreadLedger:
         if tenant_outstanding_limit < 1:
             raise ValueError("tenant_outstanding_limit must be positive")
         self._pool = pool
-        self._tenant_outstanding_limit = tenant_outstanding_limit
-        self._admission_retry_after_seconds = admission_retry_after_seconds
+        self._task_admission = TaskAdmission(
+            tenant_outstanding_limit=tenant_outstanding_limit,
+            retry_after_seconds=admission_retry_after_seconds,
+        )
 
     async def append_message(
         self,
@@ -456,12 +459,7 @@ class PostgresThreadLedger:
         semantic_key = command.idempotency_key
         async with self._pool.acquire() as connection:
             async with connection.transaction():
-                await self._lock_current_lease(connection, lease)
-                if (lease.tenant_id, lease.actor_id) != (
-                    principal.tenant_id,
-                    principal.actor_id,
-                ):
-                    raise PermissionError("Agent Run principal does not match")
+                await self.lock_submission(connection, lease, principal)
                 existing = await connection.fetchrow(
                     """
                     SELECT task.*
@@ -475,76 +473,16 @@ class PostgresThreadLedger:
                     semantic_key,
                 )
                 if existing is not None:
-                    return _task_from_row(existing)
-                count = await connection.fetchval(
-                    """
-                    SELECT delegation_count
-                    FROM agent_runs
-                    WHERE run_id = $1
-                    FOR UPDATE
-                    """,
-                    lease.run_id,
-                )
-                if count >= 2:
-                    raise DelegationLimitReached(
-                        "Agent Run already used two execution delegations"
+                    return await self._task_admission.get(
+                        connection,
+                        existing["task_id"],
                     )
-                await connection.execute(
-                    """
-                    SELECT pg_advisory_xact_lock(
-                        $1,
-                        hashtext($2)
-                    )
-                    """,
-                    1_331_862_839,
-                    principal.tenant_id,
-                )
-                outstanding = await connection.fetchval(
-                    """
-                    SELECT count(*)
-                    FROM execution_tasks
-                    WHERE tenant_id = $1
-                      AND status IN ('queued', 'running')
-                    """,
-                    principal.tenant_id,
-                )
-                if outstanding >= self._tenant_outstanding_limit:
-                    raise AdmissionRejected(
-                        self._admission_retry_after_seconds
-                    )
-                serialized_input = canonical_json(command.input)
-                fingerprint = _request_fingerprint(
+                task = await self._task_admission.accept(
+                    connection,
                     principal,
                     command,
-                    serialized_input,
-                )
-                task = await connection.fetchrow(
-                    """
-                    INSERT INTO execution_tasks (
-                        tenant_id,
-                        actor_id,
-                        idempotency_key,
-                        request_fingerprint,
-                        origin_turn_id,
-                        agent_name,
-                        executor_kind,
-                        input,
-                        origin_thread_id,
-                        origin_agent_run_id
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
-                    RETURNING *
-                    """,
-                    principal.tenant_id,
-                    principal.actor_id,
-                    command.idempotency_key,
-                    fingerprint,
-                    command.origin_turn_id,
-                    command.agent_name,
-                    command.executor_kind.value,
-                    serialized_input,
-                    lease.thread_id,
-                    lease.run_id,
+                    origin_thread_id=lease.thread_id,
+                    origin_agent_run_id=lease.run_id,
                 )
                 await connection.execute(
                     """
@@ -557,17 +495,44 @@ class PostgresThreadLedger:
                     """,
                     lease.run_id,
                     semantic_key,
-                    task["task_id"],
+                    task.task_id,
                 )
-                await connection.execute(
-                    """
-                    UPDATE agent_runs
-                    SET delegation_count = delegation_count + 1
-                    WHERE run_id = $1
-                    """,
-                    lease.run_id,
-                )
-        return _task_from_row(task)
+                await self.consume_submission(connection, lease.run_id)
+        return task
+
+    async def lock_submission(
+        self,
+        connection: asyncpg.Connection,
+        lease: AgentRunLease,
+        principal: Principal,
+    ) -> None:
+        """Fence one durable submission against the current Agent Run lease."""
+        await self._lock_current_lease(connection, lease)
+        if (lease.tenant_id, lease.actor_id) != (
+            principal.tenant_id,
+            principal.actor_id,
+        ):
+            raise PermissionError("Agent Run principal does not match")
+
+    async def consume_submission(
+        self,
+        connection: asyncpg.Connection,
+        run_id,
+    ) -> None:
+        updated = await connection.fetchval(
+            """
+            UPDATE agent_runs
+            SET delegation_count = delegation_count + 1
+            WHERE run_id = $1
+              AND delegation_count < 2
+            RETURNING delegation_count
+            """,
+            run_id,
+        )
+        if updated is None:
+            raise DelegationLimitReached(
+                "Agent Run already used two durable submissions"
+            )
 
     async def append_run_items(
         self,

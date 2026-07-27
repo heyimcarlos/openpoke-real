@@ -20,6 +20,11 @@ from ...services.threads import (
     DelegationLimitReached,
     PostgresThreadLedger,
 )
+from ...services.workflows import (
+    DefinitionNotFound,
+    WorkflowService,
+    WorkflowStartCommand,
+)
 
 
 @dataclass
@@ -39,6 +44,7 @@ class InteractionToolContext:
     principal: Principal
     origin_turn_id: str
     task_service: TaskService
+    workflow_service: WorkflowService | None = None
     thread_ledger: PostgresThreadLedger | None = None
     run_lease: AgentRunLease | None = None
     persist_locally: bool = True
@@ -46,6 +52,41 @@ class InteractionToolContext:
 
 # Tool schemas for OpenRouter
 TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "start_workflow",
+            "description": (
+                "Start one published, versioned workflow with typed inputs. "
+                "Select only the workflow identity and inputs. The server-owned "
+                "definition controls all steps and routing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "definition_key": {
+                        "type": "string",
+                        "description": "Published workflow definition key.",
+                    },
+                    "definition_version": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Exact published definition version.",
+                    },
+                    "input": {
+                        "type": "object",
+                        "description": "Inputs required by the published workflow.",
+                    },
+                },
+                "required": [
+                    "definition_key",
+                    "definition_version",
+                    "input",
+                ],
+                "additionalProperties": False,
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -198,6 +239,61 @@ async def delegate_execution(
     )
 
 
+async def start_workflow(
+    definition_key: str,
+    definition_version: int,
+    input: dict,
+    *,
+    context: InteractionToolContext,
+) -> ToolResult:
+    """Select a published Workflow without accepting model-authored structure."""
+    if context.workflow_service is None:
+        return ToolResult(
+            success=False,
+            payload={"error": "Workflow service is unavailable"},
+        )
+    semantic_start = json.dumps(
+        {
+            "definition_key": definition_key,
+            "definition_version": definition_version,
+            "input": input,
+            "origin_turn_id": context.origin_turn_id,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    command = WorkflowStartCommand(
+        idempotency_key=(
+            "workflow:"
+            + hashlib.sha256(semantic_start.encode("utf-8")).hexdigest()
+        ),
+        origin_turn_id=context.origin_turn_id,
+        definition_key=definition_key,
+        definition_version=definition_version,
+        input=input,
+    )
+    if context.run_lease is not None:
+        started = await context.workflow_service.start_for_run(
+            context.principal,
+            command,
+            context.run_lease,
+        )
+    else:
+        started = await context.workflow_service.start(
+            context.principal,
+            command,
+        )
+    return ToolResult(
+        success=True,
+        payload={
+            "status": "started",
+            "instance_id": str(started.instance.instance_id),
+            "task_id": str(started.task.task_id),
+        },
+    )
+
+
 # Send immediate message to user and record in conversation history
 def send_message_to_user(message: str, *, persist_locally: bool = True) -> ToolResult:
     """Record a user-visible reply in the conversation log."""
@@ -305,6 +401,27 @@ async def handle_tool_call(
                             "interaction turn"
                         )
                     },
+                )
+        if name == "start_workflow":
+            if context is None:
+                return ToolResult(
+                    success=False,
+                    payload={"error": "Execution context is unavailable"},
+                )
+            try:
+                return await start_workflow(**args, context=context)
+            except AdmissionRejected as exc:
+                return ToolResult(
+                    success=False,
+                    payload={
+                        "error": "Execution backlog is full",
+                        "retry_after_seconds": exc.retry_after_seconds,
+                    },
+                )
+            except DefinitionNotFound:
+                return ToolResult(
+                    success=False,
+                    payload={"error": "Workflow definition is not published"},
                 )
         if name == "send_message_to_user":
             return send_message_to_user(

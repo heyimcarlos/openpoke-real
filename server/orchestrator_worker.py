@@ -13,6 +13,7 @@ from .database import DatabaseRole, create_role_pool
 from .services.task_queue import PostgresTaskLedger, TaskService
 from .services.threads import PostgresThreadLedger
 from .services.threads.worker import AgentRunWorker
+from .services.workflows import PostgresWorkflowStore, WorkflowService
 
 
 async def _loop(worker: AgentRunWorker, poll_interval: float) -> None:
@@ -33,9 +34,16 @@ async def _run(*, once: bool, poll_interval: float) -> None:
         DatabaseRole.ORCHESTRATOR,
     )
     try:
+        thread_ledger = PostgresThreadLedger(pool)
         worker = AgentRunWorker(
-            PostgresThreadLedger(pool),
+            thread_ledger,
             TaskService(PostgresTaskLedger(pool)),
+            WorkflowService(
+                PostgresWorkflowStore(
+                    pool,
+                    run_authority=thread_ledger,
+                )
+            ),
             worker_id=f"{socket.gethostname()}:{os.getpid()}",
         )
         if once:
