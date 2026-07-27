@@ -75,18 +75,37 @@ PostgreSQL remains authoritative. RabbitMQ wakes workers but does not decide
 task state or workflow order. The durable workflow kernel owns definitions,
 instances, steps, attempts, waits, signals, and dependency transitions.
 
+The API authenticates and persists messages. A disposable interaction
+orchestrator may answer directly, submit bounded independent work, or start a
+published Workflow with typed inputs. The deterministic workflow kernel decides
+which Steps are runnable. Execution workers run deterministic code or an Agents
+SDK reasoning executor, while specialist-agent coordination remains inside one
+leased reasoning Step.
+
 ## Capacity and connection budget
+
+The initial one-API deployment has this maximum connection budget:
+
+| Role | Initial instances | Pool per instance | Maximum connections |
+| --- | ---: | ---: | ---: |
+| API | 1 | 5 | 5 |
+| Worker | 4 | 4 | 16 |
+| Migrator Job | 1 | 1 | 1 |
+| Initial maximum | | | 22 |
+
+After issue #8 externalizes chat and orchestrator state, the approved capacity
+envelope becomes:
 
 | Role | Instance envelope | Pool per instance | Maximum connections |
 | --- | ---: | ---: | ---: |
 | API | 4 | 5 | 20 |
 | Worker | 4 | 4 | 16 |
 | Migrator Job | 1 | 1 | 1 |
-| Total | | | 37 |
+| Post-#8 maximum | | | 37 |
 
-The application operating budget is 50 connections, leaving 13 for operational
-headroom. Cloud SQL system connections and administrator access need a separate
-instance-level allowance.
+The application operating budget is 50 connections. The initial maximum leaves
+28 connections of headroom. The post-#8 envelope leaves 13. Cloud SQL system
+connections and administrator access need a separate instance-level allowance.
 
 The initial API deployment has one replica because chat and scheduler state are
 not safe for multiple replicas. Four API replicas are the connection-budget

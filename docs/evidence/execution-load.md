@@ -9,7 +9,8 @@ docker compose --env-file compose.test.env -f compose.test.yaml up -d --wait
 uv run --locked python -m scripts.run_execution_evidence --report docs/evidence/execution-load.md
 ```
 
-- Revision: `f7c6c0e-dirty`
+- Producing code revision: `f7c6c0e`
+- Report commit: `a4a55c7`
 - Seed: `20260727`
 - Duration: `4.311s`
 - Exact command: `uv run --locked python -m scripts.run_execution_evidence --report docs/evidence/execution-load.md`
@@ -20,7 +21,7 @@ uv run --locked python -m scripts.run_execution_evidence --report docs/evidence/
 
 ## Workload
 
-The 1, 10, 50, and 100 client scenarios release their initial submissions from one barrier. Larger cases use one noisy tenant, one later quiet task, and four filler tenants. Workers start only after initial admission. The quiet task is admitted after PostgreSQL observes two active noisy Attempts and a queued noisy backlog. A synthetic gate holds those noisy claims until that observation, then releases them. Sixteen worker coroutines use ledger caps of eight globally and two per tenant. The fixed seed places retry and dead-letter failures on guaranteed filler tasks.
+The 1, 10, 50, and 100 client scenarios release their initial submissions from one barrier. Larger cases use one noisy tenant, one later quiet task, and four filler tenants. Workers start only after initial admission. The quiet task is admitted after PostgreSQL observes two active noisy Attempts and a queued noisy backlog. A synthetic gate holds those noisy claims until that observation, then releases them. Sixteen local claimant coroutines deliberately create contention against ledger caps of eight globally and two per tenant. Their 18-connection database pool is a test-harness setting, not the production worker capacity. The fixed seed places retry and dead-letter failures on guaranteed filler tasks.
 
 ## Scenario results
 
@@ -55,7 +56,7 @@ The 1, 10, 50, and 100 client scenarios release their initial submissions from o
 | 100 | noisy | 50 | 10 | 50 | 54.35 |
 | 100 | quiet | 1 | 0 | 1 | 1.087 |
 
-| Clients | Accept pool peak/max | Worker pool peak/max |
+| Clients | Acceptance DB pool peak/max | Worker DB pool peak/max |
 | ---: | ---: | ---: |
 | 1 | 1/5 | 17/18 |
 | 10 | 5/5 | 16/18 |
