@@ -28,6 +28,11 @@ conversation files. This works for the local browser demonstration because the
 API and worker share a filesystem. It does not cross a Cloud Run service
 boundary.
 
+Run that local browser demonstration with one worker slot. File-backed
+projection is not durably ordered, so concurrent completions for one
+conversation can reason from stale transcript snapshots. Issue #8 replaces this
+compatibility path with one serialized durable Agent Run per Thread.
+
 ### Single-day GCP control-plane target
 
 ```text
