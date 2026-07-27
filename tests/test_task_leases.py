@@ -80,9 +80,27 @@ async def test_quiet_tenant_progresses_behind_noisy_tenant_backlog(
 
     assert [claim.tenant_id for claim in claims if claim is not None] == [
         "noisy",
-        "noisy",
         "quiet",
+        "noisy",
     ]
+
+
+@pytest.mark.asyncio
+async def test_replenished_noisy_backlog_does_not_starve_later_quiet_tenant(
+    ledger: PostgresTaskLedger,
+) -> None:
+    await _submit_tasks(ledger, "noisy", 10)
+    first = await ledger.claim("worker-1", timedelta(minutes=1))
+    second = await ledger.claim("worker-2", timedelta(minutes=1))
+    assert first is not None
+    assert second is not None
+    await _submit_tasks(ledger, "quiet", 1)
+    await ledger.complete(first, {"done": True})
+
+    next_claim = await ledger.claim("worker-3", timedelta(minutes=1))
+
+    assert next_claim is not None
+    assert next_claim.tenant_id == "quiet"
 
 
 @pytest.mark.asyncio

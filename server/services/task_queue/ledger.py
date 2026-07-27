@@ -198,7 +198,9 @@ class PostgresTaskLedger:
                                   AND task.lease_expires_at <= clock_timestamp()
                               )
                           )
-                        ORDER BY task.created_at, task.task_id
+                        ORDER BY COALESCE(tenant.active_count, 0),
+                                 task.created_at,
+                                 task.task_id
                         FOR UPDATE OF task SKIP LOCKED
                         LIMIT 1
                     )
