@@ -8,7 +8,7 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
-from agents import Agent, FunctionTool, RunConfig, Runner
+from agents import Agent, FunctionTool, Model, RunConfig, Runner
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
@@ -61,20 +61,16 @@ class AgentsSdkExecutor:
     def __init__(
         self,
         *,
-        api_key: str,
-        model_name: str,
+        api_key: str | None = None,
+        model_name: str | None = None,
+        model: Model | None = None,
         runner: Any = Runner,
         tool_schemas: Sequence[dict[str, Any]] | None = None,
         tool_registry_factory: ToolRegistryFactory = get_tool_registry,
     ) -> None:
-        if not api_key:
-            raise ValueError("OpenRouter API key is required")
-        self._model = OpenAIChatCompletionsModel(
-            model=model_name,
-            openai_client=AsyncOpenAI(
-                api_key=api_key,
-                base_url="https://openrouter.ai/api/v1",
-            ),
+        self._model = model or create_openrouter_model(
+            api_key=api_key,
+            model_name=model_name,
         )
         self._runner = runner
         self._tool_schemas = (
@@ -189,3 +185,23 @@ class AgentsSdkExecutor:
                 return {"error": "Tool execution failed"}
 
         return invoke
+
+
+def create_openrouter_model(
+    *,
+    api_key: str | None,
+    model_name: str | None,
+) -> OpenAIChatCompletionsModel:
+    """Build the shared SDK model adapter from trusted worker settings."""
+
+    if not api_key:
+        raise ValueError("OpenRouter API key is required")
+    if not model_name:
+        raise ValueError("OpenRouter model name is required")
+    return OpenAIChatCompletionsModel(
+        model=model_name,
+        openai_client=AsyncOpenAI(
+            api_key=api_key,
+            base_url="https://openrouter.ai/api/v1",
+        ),
+    )

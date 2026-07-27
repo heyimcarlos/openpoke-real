@@ -166,6 +166,7 @@ class PostgresTaskLedger:
 
         async with self._pool.acquire() as connection:
             async with connection.transaction():
+                workflow_context = None
                 await connection.execute(
                     "SELECT pg_advisory_xact_lock($1)",
                     _CLAIM_CAPACITY_LOCK_ID,
@@ -272,8 +273,21 @@ class PostgresTaskLedger:
                     from ..workflows import record_workflow_task_claimed
 
                     await record_workflow_task_claimed(connection, row)
+                    if instance is not None:
+                        workflow_context = await connection.fetchrow(
+                            """
+                            SELECT instance_id, step_id
+                            FROM workflow_steps
+                            WHERE execution_task_id = $1
+                            """,
+                            row["task_id"],
+                        )
                     break
-        return _lease_from_row(row) if row else None
+        return (
+            _lease_from_row(row, workflow_context=workflow_context)
+            if row
+            else None
+        )
 
     async def complete(
         self,
@@ -644,7 +658,11 @@ async def _cancel_inactive_workflow_task(
         await record_workflow_task_failed(connection, row)
 
 
-def _lease_from_row(row: asyncpg.Record) -> TaskLease:
+def _lease_from_row(
+    row: asyncpg.Record,
+    *,
+    workflow_context: asyncpg.Record | None = None,
+) -> TaskLease:
     return TaskLease(
         task_id=row["task_id"],
         tenant_id=row["tenant_id"],
@@ -661,4 +679,14 @@ def _lease_from_row(row: asyncpg.Record) -> TaskLease:
         expires_at=row["lease_expires_at"],
         origin_thread_id=row.get("origin_thread_id"),
         origin_agent_run_id=row.get("origin_agent_run_id"),
+        workflow_instance_id=(
+            workflow_context["instance_id"]
+            if workflow_context is not None
+            else None
+        ),
+        workflow_step_id=(
+            workflow_context["step_id"]
+            if workflow_context is not None
+            else None
+        ),
     )

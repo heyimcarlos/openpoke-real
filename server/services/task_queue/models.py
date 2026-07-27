@@ -34,6 +34,7 @@ class FailureCode(str, Enum):
     LEASE_EXPIRED = "lease_expired"
     ATTEMPTS_EXHAUSTED = "attempts_exhausted"
     EXECUTION_TIMEOUT = "execution_timeout"
+    AGENT_RETRYABLE = "agent_retryable"
     AGENT_NON_RETRYABLE = "agent_non_retryable"
     UNKNOWN_EXECUTOR = "unknown_executor"
 
@@ -47,7 +48,10 @@ class TaskFailure(BaseModel):
 
     @property
     def retryable(self) -> bool:
-        return self.code is FailureCode.SYNTHETIC_RETRYABLE
+        return self.code in {
+            FailureCode.SYNTHETIC_RETRYABLE,
+            FailureCode.AGENT_RETRYABLE,
+        }
 
 
 def canonical_json(value: JsonValue) -> str:
@@ -147,3 +151,5 @@ class TaskLease:
     expires_at: datetime
     origin_thread_id: UUID | None = None
     origin_agent_run_id: UUID | None = None
+    workflow_instance_id: UUID | None = None
+    workflow_step_id: UUID | None = None
