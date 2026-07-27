@@ -8,15 +8,16 @@ OpenPoke is a simplified, open-source take on [Interaction Company’s](https://
 - Next.js web UI that proxies everything through the shared `.env`, so plugging in API keys is the only setup.
 
 ## Requirements
-- Python 3.10+
+- Python 3.11+
+- [uv](https://docs.astral.sh/uv/)
 - Node.js 18+
 - npm 9+
 
 ## Quickstart
 1. **Clone and enter the repo.**
    ```bash
-   git clone https://github.com/shlokkhemani/OpenPoke
-   cd OpenPoke
+   git clone https://github.com/heyimcarlos/openpoke-real
+   cd openpoke-real
    ```
 2. **Create a shared env file.** Copy the template and open it in your editor:
    ```bash
@@ -34,42 +35,23 @@ OpenPoke is a simplified, open-source take on [Interaction Company’s](https://
    - Create an API key
    - Set up Gmail integration and get your auth config ID
    - Replace `your_composio_api_key_here` and `your_gmail_auth_config_id_here` in `.env`
-4. **(Required) Create and activate a Python 3.10+ virtualenv:**
+4. **Install the locked backend environment:**
    ```bash
-   # Ensure you're using Python 3.10+
-   python3.10 -m venv .venv
-   source .venv/bin/activate
-   
-   # Verify Python version (should show 3.10+)
-   python --version
+   uv sync --locked --group dev
    ```
-   On Windows (PowerShell):
-   ```powershell
-   # Use Python 3.10+ (adjust path as needed)
-   python3.10 -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   
-   # Verify Python version
-   python --version
-   ```
-
-5. **Install backend dependencies:**
-   ```bash
-   pip install -r server/requirements.txt
-   ```
-6. **Install frontend dependencies:**
+5. **Install frontend dependencies:**
    ```bash
    npm install --prefix web
    ```
-7. **Start the FastAPI server:**
+6. **Start the FastAPI server:**
    ```bash
-   python -m server.server --reload
+   uv run --locked python -m server.server --reload
    ```
-8. **Start the Next.js app (new terminal):**
+7. **Start the Next.js app (new terminal):**
    ```bash
    npm run dev --prefix web
    ```
-9. **Connect Gmail for email workflows.** With both services running, open [http://localhost:3000](http://localhost:3000), head to *Settings → Gmail*, and complete the Composio OAuth flow. This step is required for email drafting, replies, and the important-email monitor.
+8. **Connect Gmail for email workflows.** With both services running, open [http://localhost:3000](http://localhost:3000), head to *Settings → Gmail*, and complete the Composio OAuth flow. This step is required for email drafting, replies, and the important-email monitor.
 
 The web app proxies API calls to the Python server using the values in `.env`, so keeping both processes running is required for end-to-end flows.
 
@@ -80,9 +62,8 @@ provider:
 
 ```bash
 docker compose --env-file compose.test.env -f compose.test.yaml up -d --wait
-python -m venv .venv
-.venv/bin/pip install -r server/requirements-dev.txt
-PYTHONPATH=. .venv/bin/python -m pytest tests/test_task_acceptance.py tests/test_task_auth.py -q
+uv sync --locked --group dev
+uv run --locked pytest -q
 docker compose --env-file compose.test.env -f compose.test.yaml down
 ```
 
