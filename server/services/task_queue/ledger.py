@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
 from uuid import UUID
 
 import asyncpg
@@ -44,11 +43,7 @@ class PostgresTaskLedger:
         command: SubmitTask,
     ) -> TaskRecord:
         serialized_input = canonical_json(command.input)
-        fingerprint = _request_fingerprint(
-            principal,
-            command,
-            serialized_input,
-        )
+        fingerprint = _request_fingerprint(principal, command, serialized_input)
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 inserted = await connection.fetchrow(
@@ -120,14 +115,6 @@ def _request_fingerprint(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _decode_json(value: Any) -> dict[str, Any] | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return json.loads(value)
-    return dict(value)
-
-
 def _task_from_row(row: asyncpg.Record) -> TaskRecord:
     return TaskRecord(
         task_id=row["task_id"],
@@ -136,8 +123,8 @@ def _task_from_row(row: asyncpg.Record) -> TaskRecord:
         idempotency_key=row["idempotency_key"],
         origin_turn_id=row["origin_turn_id"],
         agent_name=row["agent_name"],
-        input=_decode_json(row["input"]) or {},
+        input=json.loads(row["input"]),
         status=TaskStatus(row["status"]),
-        result=_decode_json(row["result"]),
+        result=json.loads(row["result"]) if row["result"] is not None else None,
         created_at=row["created_at"],
     )

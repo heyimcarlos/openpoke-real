@@ -1,9 +1,4 @@
-"""OpenPoke Python server package.
-
-Import ``server.app`` explicitly when the FastAPI application is needed. Keeping
-the package initializer side-effect free prevents service imports from loading
-runtime configuration or starting application wiring.
-"""
+"""OpenPoke Python server package."""
 
 from __future__ import annotations
 

@@ -32,10 +32,7 @@ SIGNING_KEY = "test-only-signing-key-with-at-least-32-bytes"
 
 def _require_disposable_test_database(database_url: str) -> None:
     database_name = unquote(urlparse(database_url).path).lstrip("/")
-    if not (
-        database_name.startswith("test_")
-        or database_name.endswith("_test")
-    ):
+    if not database_name.startswith("test_") and not database_name.endswith("_test"):
         raise RuntimeError(
             "task-ledger tests require a database named test_* or *_test"
         )
