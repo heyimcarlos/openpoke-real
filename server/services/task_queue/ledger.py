@@ -201,8 +201,6 @@ class PostgresTaskLedger:
                             "idempotency key already identifies different task input"
                         )
 
-        if row is None:
-            raise RuntimeError("task acceptance did not return a durable record")
         return _task_from_row(row)
 
     async def get(self, tenant_id: str, task_id: UUID) -> TaskRecord | None:
