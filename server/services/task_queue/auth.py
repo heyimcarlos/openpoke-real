@@ -64,4 +64,4 @@ def _required_string_claim(claims: dict[str, Any], name: str) -> str:
 def _scope_claim(value: Any) -> frozenset[str]:
     if not isinstance(value, str):
         raise ValueError("scope must be a space-delimited string")
-    return frozenset(scope for scope in value.split() if scope)
+    return frozenset(value.split())
