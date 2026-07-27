@@ -10,7 +10,10 @@ from server.agents.interaction_agent.agent import (
     build_system_prompt,
     prepare_message_with_history,
 )
-from server.agents.interaction_agent.runtime import InteractionAgentRuntime
+from server.agents.interaction_agent.runtime import (
+    InteractionAgentRuntime,
+    _LoopSummary,
+)
 from server.agents.interaction_agent.tools import (
     InteractionToolContext,
     delegate_execution,
@@ -155,6 +158,16 @@ def test_model_contract_describes_two_bounded_delegations() -> None:
     assert "complete objective" in prompt
     assert "parallel as much as possible" not in prompt
     assert "send_message_to_agent" not in prompt
+
+
+def test_wait_control_message_is_not_exposed_as_a_reply() -> None:
+    runtime = object.__new__(InteractionAgentRuntime)
+    summary = _LoopSummary(
+        last_assistant_text="<wait>User already received this</wait>",
+        recorded_reply=True,
+    )
+
+    assert runtime._finalize_response(summary) == ""
 
 
 @pytest.mark.asyncio

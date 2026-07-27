@@ -44,6 +44,7 @@ class _LoopSummary:
     user_messages: List[str] = field(default_factory=list)
     tool_names: List[str] = field(default_factory=list)
     execution_agents: Set[str] = field(default_factory=set)
+    recorded_reply: bool = False
 
 
 class InteractionAgentRuntime:
@@ -229,6 +230,8 @@ class InteractionAgentRuntime:
 
                 if result.user_message:
                     summary.user_messages.append(result.user_message)
+                if result.recorded_reply:
+                    summary.recorded_reply = True
 
                 tool_message = {
                     "role": "tool",
@@ -460,5 +463,7 @@ class InteractionAgentRuntime:
 
         if summary.user_messages:
             return summary.user_messages[-1]
+        if summary.recorded_reply:
+            return ""
 
         return summary.last_assistant_text
