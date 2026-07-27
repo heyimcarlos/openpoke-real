@@ -30,6 +30,10 @@ class StaleLease(RuntimeError):
     """A worker no longer holds completion authority for a task."""
 
 
+class TaskResultConflict(ValueError):
+    """A completed task received a different result for the same Attempt."""
+
+
 class PostgresTaskLedger:
     """Keep accepted execution work durable behind one small interface."""
 
@@ -164,87 +168,101 @@ class PostgresTaskLedger:
                     "SELECT pg_advisory_xact_lock($1)",
                     _CLAIM_CAPACITY_LOCK_ID,
                 )
-                await connection.execute(
-                    """
-                    UPDATE execution_tasks
-                    SET status = 'dead_lettered',
-                        failure_code = 'lease_expired',
-                        lease_owner = NULL,
-                        lease_expires_at = NULL
-                    WHERE status = 'running'
-                      AND lease_expires_at <= clock_timestamp()
-                      AND attempt_count >= $1
-                    """,
+                await _reconcile_terminal_tasks(
+                    connection,
                     self._max_attempts,
                 )
-                await connection.execute(
-                    """
-                    UPDATE execution_tasks
-                    SET status = 'dead_lettered',
-                        failure_code = 'attempts_exhausted',
-                        lease_owner = NULL,
-                        lease_expires_at = NULL
-                    WHERE status = 'queued'
-                      AND attempt_count >= $1
-                    """,
-                    self._max_attempts,
-                )
-                row = await connection.fetchrow(
-                    """
-                    WITH active_by_tenant AS (
-                        SELECT tenant_id, count(*) AS active_count
-                        FROM execution_tasks
-                        WHERE status = 'running'
-                          AND lease_expires_at > clock_timestamp()
-                        GROUP BY tenant_id
-                    ),
-                    global_capacity AS (
-                        SELECT count(*) AS active_count
-                        FROM execution_tasks
-                        WHERE status = 'running'
-                          AND lease_expires_at > clock_timestamp()
-                    ),
-                    candidate AS (
+                while True:
+                    candidate = await connection.fetchrow(
+                        """
+                        WITH active_by_tenant AS (
+                            SELECT tenant_id, count(*) AS active_count
+                            FROM execution_tasks
+                            WHERE status = 'running'
+                              AND lease_expires_at > clock_timestamp()
+                            GROUP BY tenant_id
+                        ),
+                        global_capacity AS (
+                            SELECT count(*) AS active_count
+                            FROM execution_tasks
+                            WHERE status = 'running'
+                              AND lease_expires_at > clock_timestamp()
+                        )
                         SELECT task.task_id
                         FROM execution_tasks AS task
                         LEFT JOIN active_by_tenant AS tenant
                           ON tenant.tenant_id = task.tenant_id
                         CROSS JOIN global_capacity AS global
-                        WHERE global.active_count < $3
-                          AND COALESCE(tenant.active_count, 0) < $4
+                        WHERE global.active_count < $1
+                          AND COALESCE(tenant.active_count, 0) < $2
                           AND (
                               (
                                   task.status = 'queued'
-                                  AND task.attempt_count < $5
+                                  AND task.attempt_count < $3
                               )
                               OR (
                                   task.status = 'running'
-                                  AND task.lease_expires_at <= clock_timestamp()
-                                  AND task.attempt_count < $5
+                                  AND task.lease_expires_at
+                                      <= clock_timestamp()
+                                  AND task.attempt_count < $3
                               )
                           )
                         ORDER BY COALESCE(tenant.active_count, 0),
                                  task.created_at,
                                  task.task_id
-                        FOR UPDATE OF task SKIP LOCKED
                         LIMIT 1
+                        """,
+                        self._global_active_limit,
+                        self._tenant_active_limit,
+                        self._max_attempts,
                     )
-                    UPDATE execution_tasks AS task
-                    SET status = 'running',
-                        attempt_count = task.attempt_count + 1,
-                        lease_generation = task.lease_generation + 1,
-                        lease_owner = $1,
-                        lease_expires_at = clock_timestamp() + $2::interval
-                    FROM candidate
-                    WHERE task.task_id = candidate.task_id
-                    RETURNING task.*
-                    """,
-                    worker_id,
-                    lease_duration,
-                    self._global_active_limit,
-                    self._tenant_active_limit,
-                    self._max_attempts,
-                )
+                    if candidate is None:
+                        row = None
+                        break
+                    instance = await _lock_workflow_instance_for_task(
+                        connection,
+                        candidate["task_id"],
+                    )
+                    if instance is not None and instance["status"] != "active":
+                        await _cancel_inactive_workflow_task(
+                            connection,
+                            candidate["task_id"],
+                            instance["status"],
+                        )
+                        continue
+                    row = await connection.fetchrow(
+                        """
+                        UPDATE execution_tasks
+                        SET status = 'running',
+                            attempt_count = attempt_count + 1,
+                            lease_generation = lease_generation + 1,
+                            lease_owner = $2,
+                            lease_expires_at = (
+                                clock_timestamp() + $3::interval
+                            )
+                        WHERE task_id = $1
+                          AND attempt_count < $4
+                          AND (
+                              status = 'queued'
+                              OR (
+                                  status = 'running'
+                                  AND lease_expires_at
+                                      <= clock_timestamp()
+                              )
+                          )
+                        RETURNING *
+                        """,
+                        candidate["task_id"],
+                        worker_id,
+                        lease_duration,
+                        self._max_attempts,
+                    )
+                    if row is None:
+                        continue
+                    from ..workflows import record_workflow_task_claimed
+
+                    await record_workflow_task_claimed(connection, row)
+                    break
         return _lease_from_row(row) if row else None
 
     async def complete(
@@ -255,6 +273,10 @@ class PostgresTaskLedger:
         serialized_result = canonical_json(result)
         async with self._pool.acquire() as connection:
             async with connection.transaction():
+                await _lock_workflow_instance_for_task(
+                    connection,
+                    lease.task_id,
+                )
                 row = await connection.fetchrow(
                     """
                     UPDATE execution_tasks
@@ -276,8 +298,41 @@ class PostgresTaskLedger:
                     serialized_result,
                 )
                 if row is None:
+                    existing = await connection.fetchrow(
+                        """
+                        SELECT *
+                        FROM execution_tasks
+                        WHERE task_id = $1
+                        FOR UPDATE
+                        """,
+                        lease.task_id,
+                    )
+                    if (
+                        existing is not None
+                        and existing["status"] == "completed"
+                        and existing["lease_generation"]
+                        == lease.lease_generation
+                    ):
+                        accepted_result = canonical_json(
+                            json.loads(existing["result"])
+                        )
+                        if accepted_result != serialized_result:
+                            raise TaskResultConflict(
+                                "task Attempt already accepted a different result"
+                            )
+                        return task_from_row(existing)
                     raise StaleLease("task lease is expired or superseded")
-                if row.get("origin_thread_id") is not None:
+
+                from ..workflows import advance_workflow_for_task
+
+                workflow_completed = await advance_workflow_for_task(
+                    connection,
+                    row,
+                )
+                if (
+                    row.get("origin_thread_id") is not None
+                    and workflow_completed in {None, True}
+                ):
                     from ..threads.continuation import append_execution_result
 
                     await append_execution_result(connection, row)
@@ -288,34 +343,219 @@ class PostgresTaskLedger:
         lease: TaskLease,
         failure: TaskFailure,
     ) -> TaskRecord:
-        row = await self._pool.fetchrow(
-            """
-            UPDATE execution_tasks
-            SET status = CASE
-                    WHEN $5 AND attempt_count < $6
-                    THEN 'queued'
-                    ELSE 'dead_lettered'
-                END,
-                failure_code = $4,
-                lease_owner = NULL,
-                lease_expires_at = NULL
-            WHERE task_id = $1
-              AND status = 'running'
-              AND lease_owner = $2
-              AND lease_generation = $3
-              AND lease_expires_at > clock_timestamp()
-            RETURNING *
-            """,
-            lease.task_id,
-            lease.worker_id,
-            lease.lease_generation,
-            failure.code.value,
-            failure.retryable,
-            self._max_attempts,
-        )
-        if row is None:
-            raise StaleLease("task lease is expired or superseded")
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                await _lock_workflow_instance_for_task(
+                    connection,
+                    lease.task_id,
+                )
+                row = await connection.fetchrow(
+                    """
+                    UPDATE execution_tasks
+                    SET status = CASE
+                            WHEN $5 AND attempt_count < $6
+                            THEN 'queued'
+                            ELSE 'dead_lettered'
+                        END,
+                        failure_code = $4,
+                        lease_owner = NULL,
+                        lease_expires_at = NULL
+                    WHERE task_id = $1
+                      AND status = 'running'
+                      AND lease_owner = $2
+                      AND lease_generation = $3
+                      AND lease_expires_at > clock_timestamp()
+                    RETURNING *
+                    """,
+                    lease.task_id,
+                    lease.worker_id,
+                    lease.lease_generation,
+                    failure.code.value,
+                    failure.retryable,
+                    self._max_attempts,
+                )
+                if row is None:
+                    raise StaleLease("task lease is expired or superseded")
+                from ..workflows import record_workflow_task_failed
+
+                await record_workflow_task_failed(connection, row)
+                row = await connection.fetchrow(
+                    """
+                    SELECT *
+                    FROM execution_tasks
+                    WHERE task_id = $1
+                    """,
+                    lease.task_id,
+                )
+                if row is None:
+                    raise RuntimeError("failed task disappeared")
         return task_from_row(row)
+
+
+async def _lock_workflow_instance_for_task(
+    connection: asyncpg.Connection,
+    task_id: UUID,
+) -> asyncpg.Record | None:
+    if await connection.fetchval(
+        "SELECT to_regclass('workflow_steps')"
+    ) is None:
+        return None
+    instance_id = await connection.fetchval(
+        """
+        SELECT instance_id
+        FROM workflow_steps
+        WHERE execution_task_id = $1
+        """,
+        task_id,
+    )
+    if instance_id is None:
+        return None
+    return await connection.fetchrow(
+        """
+        SELECT *
+        FROM workflow_instances
+        WHERE instance_id = $1
+        FOR UPDATE
+        """,
+        instance_id,
+    )
+
+
+async def _reconcile_terminal_tasks(
+    connection: asyncpg.Connection,
+    max_attempts: int,
+) -> None:
+    candidates = {
+        row["task_id"]
+        for row in await connection.fetch(
+            """
+            SELECT task_id
+            FROM execution_tasks
+            WHERE (
+                    status = 'running'
+                    AND lease_expires_at <= clock_timestamp()
+                    AND attempt_count >= $1
+                  )
+               OR (
+                    status = 'queued'
+                    AND attempt_count >= $1
+                  )
+            """,
+            max_attempts,
+        )
+    }
+    if await connection.fetchval(
+        "SELECT to_regclass('workflow_steps')"
+    ) is not None:
+        candidates.update(
+            row["task_id"]
+            for row in await connection.fetch(
+                """
+                SELECT task.task_id
+                FROM execution_tasks AS task
+                JOIN workflow_steps AS step
+                  ON step.execution_task_id = task.task_id
+                JOIN workflow_instances AS instance
+                  ON instance.instance_id = step.instance_id
+                WHERE instance.status = 'failed'
+                  AND task.status = 'running'
+                  AND task.lease_expires_at <= clock_timestamp()
+                """
+            )
+        )
+    from ..workflows import record_workflow_task_failed
+
+    for task_id in sorted(candidates):
+        instance = await _lock_workflow_instance_for_task(
+            connection,
+            task_id,
+        )
+        if instance is not None and instance["status"] == "failed":
+            row = await connection.fetchrow(
+                """
+                UPDATE execution_tasks
+                SET status = 'cancelled',
+                    failure_code = CASE
+                        WHEN status = 'running' THEN 'lease_expired'
+                        ELSE 'attempts_exhausted'
+                    END,
+                    lease_owner = NULL,
+                    lease_expires_at = NULL
+                WHERE task_id = $1
+                  AND (
+                      status = 'queued'
+                      OR (
+                          status = 'running'
+                          AND lease_expires_at <= clock_timestamp()
+                      )
+                  )
+                RETURNING *
+                """,
+                task_id,
+            )
+        else:
+            row = await connection.fetchrow(
+                """
+                UPDATE execution_tasks
+                SET status = 'dead_lettered',
+                    failure_code = CASE
+                        WHEN status = 'running' THEN 'lease_expired'
+                        ELSE 'attempts_exhausted'
+                    END,
+                    lease_owner = NULL,
+                    lease_expires_at = NULL
+                WHERE task_id = $1
+                  AND (
+                      (
+                          status = 'running'
+                          AND lease_expires_at <= clock_timestamp()
+                          AND attempt_count >= $2
+                      )
+                      OR (
+                          status = 'queued'
+                          AND attempt_count >= $2
+                      )
+                  )
+                RETURNING *
+                """,
+                task_id,
+                max_attempts,
+            )
+        if row is not None:
+            await record_workflow_task_failed(connection, row)
+
+
+async def _cancel_inactive_workflow_task(
+    connection: asyncpg.Connection,
+    task_id: UUID,
+    instance_status: str,
+) -> None:
+    row = await connection.fetchrow(
+        """
+        UPDATE execution_tasks
+        SET status = 'cancelled',
+            failure_code = CASE
+                WHEN status = 'running' THEN 'lease_expired'
+                ELSE failure_code
+            END,
+            lease_owner = NULL,
+            lease_expires_at = NULL
+        WHERE task_id = $1
+          AND (
+              status = 'queued'
+              OR (
+                  status = 'running'
+                  AND lease_expires_at <= clock_timestamp()
+              )
+          )
+        RETURNING *
+        """,
+        task_id,
+    )
+    if row is not None and instance_status == "failed":
+        from ..workflows import record_workflow_task_failed
+
+        await record_workflow_task_failed(connection, row)
 
 
 def _lease_from_row(row: asyncpg.Record) -> TaskLease:
