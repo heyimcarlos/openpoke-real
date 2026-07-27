@@ -25,6 +25,8 @@ class JwtPrincipalVerifier:
     ) -> None:
         if not signing_key or not issuer or not audience:
             raise ValueError("JWT signing key, issuer, and audience are required")
+        if len(signing_key.encode("utf-8")) < 32:
+            raise ValueError("JWT HS256 signing key must be at least 32 bytes")
         self._signing_key = signing_key
         self._issuer = issuer
         self._audience = audience

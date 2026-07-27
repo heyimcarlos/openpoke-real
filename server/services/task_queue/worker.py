@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -32,7 +31,7 @@ class WorkerOutcome:
     failure: FailureCode | None = None
 
 
-ResultSink = Callable[[TaskRecord], Awaitable[None] | None]
+ResultSink = Callable[[TaskRecord], Awaitable[None]]
 
 
 class TaskWorker:
@@ -98,12 +97,10 @@ class TaskWorker:
 
         if self._result_sink is not None:
             try:
-                projection = self._result_sink(completed)
-                if inspect.isawaitable(projection):
-                    await asyncio.wait_for(
-                        projection,
-                        timeout=self._projection_timeout_seconds,
-                    )
+                await asyncio.wait_for(
+                    self._result_sink(completed),
+                    timeout=self._projection_timeout_seconds,
+                )
             except Exception:
                 return WorkerOutcome(
                     status=WorkerOutcomeStatus.PROJECTION_FAILED,

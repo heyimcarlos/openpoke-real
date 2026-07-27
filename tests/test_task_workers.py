@@ -27,10 +27,9 @@ from server.services.task_queue.worker import (
     TaskWorker,
     WorkerOutcomeStatus,
 )
-from server.agents.execution_agent.sdk_executor import (
-    AgentExecutionOutput,
-    AgentsSdkExecutor,
-)
+from server.agents.execution_agent import sdk_executor
+from server.agents.execution_agent.sdk_executor import AgentsSdkExecutor
+from server.agents.interaction_agent.runtime import InteractionResult
 from server.services.task_queue.projection import InteractionResultSink
 
 
@@ -117,10 +116,7 @@ async def test_synthetic_executor_modes_are_deterministic(
 
     if expected_failure is None:
         result = await executor.execute(lease)
-        assert result == {
-            "agent_name": "load-probe",
-            "response": "synthetic task completed",
-        }
+        assert result == {"response": "synthetic task completed"}
     else:
         with pytest.raises(ExecutionFailure) as caught:
             await executor.execute(lease)
@@ -157,11 +153,15 @@ async def test_worker_claims_executes_and_projects_only_completed_result(
 ) -> None:
     await _submit_synthetic(ledger, key="worker-success", mode="success")
     projected = []
+
+    async def capture_projection(record: TaskRecord) -> None:
+        projected.append(record)
+
     worker = TaskWorker(
         ledger,
         ExecutorRegistry({ExecutorKind.SYNTHETIC: SyntheticExecutor()}),
         worker_id="worker-1",
-        result_sink=projected.append,
+        result_sink=capture_projection,
     )
 
     outcome = await worker.run_once()
@@ -229,16 +229,20 @@ async def test_stale_worker_cannot_project_result(
     class DelayedExecutor:
         async def execute(self, lease: TaskLease) -> dict[str, str]:
             await release.wait()
-            return {"response": "late", "agent_name": lease.agent_name}
+            return {"response": "late"}
 
     projected = []
+
+    async def capture_projection(record: TaskRecord) -> None:
+        projected.append(record)
+
     registry = ExecutorRegistry({ExecutorKind.SYNTHETIC: DelayedExecutor()})
     stale_worker = TaskWorker(
         ledger,
         registry,
         worker_id="worker-stale",
         lease_duration=timedelta(milliseconds=20),
-        result_sink=projected.append,
+        result_sink=capture_projection,
     )
     replacement = TaskWorker(
         ledger,
@@ -263,9 +267,11 @@ async def test_stale_worker_cannot_project_result(
 
 
 @pytest.mark.asyncio
-async def test_agents_sdk_executor_uses_typed_bounded_openrouter_run() -> None:
+async def test_agents_sdk_executor_uses_typed_bounded_openrouter_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FakeRunResult:
-        final_output = AgentExecutionOutput(response="invoice found")
+        final_output = "invoice found"
 
     class FakeRunner:
         def __init__(self) -> None:
@@ -275,6 +281,18 @@ async def test_agents_sdk_executor_uses_typed_bounded_openrouter_run() -> None:
             self.calls.append((agent, instructions, kwargs))
             return FakeRunResult()
 
+    openai_client_arguments = {}
+    async_openai = sdk_executor.AsyncOpenAI
+
+    def capture_openai_client(**kwargs):
+        openai_client_arguments.update(kwargs)
+        return async_openai(**kwargs)
+
+    monkeypatch.setattr(
+        sdk_executor,
+        "AsyncOpenAI",
+        capture_openai_client,
+    )
     fake_runner = FakeRunner()
     executor = AgentsSdkExecutor(
         api_key="test-key-never-sent",
@@ -299,15 +317,12 @@ async def test_agents_sdk_executor_uses_typed_bounded_openrouter_run() -> None:
 
     result = await executor.execute(lease)
 
-    assert result == {
-        "agent_name": "invoice-search",
-        "response": "invoice found",
-    }
+    assert result == {"response": "invoice found"}
     agent, instructions, kwargs = fake_runner.calls[0]
     assert instructions == "find the invoice"
-    assert agent.output_type is AgentExecutionOutput
+    assert agent.output_type is None
     assert agent.model.model == "provider/test-model"
-    assert str(agent.model._client.base_url) == "https://openrouter.ai/api/v1/"
+    assert openai_client_arguments["base_url"] == "https://openrouter.ai/api/v1"
     assert kwargs["max_turns"] == 8
     assert kwargs["run_config"].tracing_disabled is True
     assert kwargs["run_config"].trace_include_sensitive_data is False
@@ -316,7 +331,7 @@ async def test_agents_sdk_executor_uses_typed_bounded_openrouter_run() -> None:
 @pytest.mark.asyncio
 async def test_agents_sdk_tool_failure_is_non_retryable() -> None:
     class FakeRunResult:
-        final_output = AgentExecutionOutput(response="ignored")
+        final_output = "ignored"
 
     class FakeRunner:
         async def run(self, agent, _instructions, **_kwargs):
@@ -376,8 +391,9 @@ async def test_result_sink_preserves_original_actor_and_turn_cause() -> None:
         def __init__(self, *, tool_context) -> None:
             captured.append(tool_context)
 
-        async def handle_agent_message(self, message: str) -> None:
+        async def handle_agent_message(self, message: str) -> InteractionResult:
             captured.append(message)
+            return InteractionResult(success=True, response="")
 
     task_service = object()
     sink = InteractionResultSink(
@@ -408,3 +424,40 @@ async def test_result_sink_preserves_original_actor_and_turn_cause() -> None:
     assert context.origin_turn_id == "turn-7"
     assert context.task_service is task_service
     assert message == "[SUCCESS] invoice-search: invoice found"
+
+
+@pytest.mark.asyncio
+async def test_result_sink_ignores_synthetic_task_results() -> None:
+    runtime_calls = []
+
+    class UnexpectedRuntime:
+        def __init__(self, *, tool_context) -> None:
+            runtime_calls.append(tool_context)
+
+        async def handle_agent_message(self, message: str) -> InteractionResult:
+            runtime_calls.append(message)
+            return InteractionResult(success=True, response="")
+
+    sink = InteractionResultSink(
+        object(),
+        runtime_factory=UnexpectedRuntime,
+    )
+    record = TaskRecord(
+        task_id=uuid4(),
+        tenant_id="tenant-a",
+        actor_id="load-test",
+        idempotency_key="synthetic:7",
+        origin_turn_id="load:7",
+        agent_name="load-probe",
+        executor_kind=ExecutorKind.SYNTHETIC,
+        input={"mode": "success"},
+        status=TaskStatus.COMPLETED,
+        result={"response": "synthetic task completed"},
+        attempt_count=1,
+        failure=None,
+        created_at=datetime.now(timezone.utc),
+    )
+
+    await sink(record)
+
+    assert runtime_calls == []

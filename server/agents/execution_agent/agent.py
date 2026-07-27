@@ -2,10 +2,9 @@
 
 import hashlib
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import Optional
 
 from ...services.execution import get_execution_agent_logs
-from ...logging_config import logger
 
 
 # Load system prompt template from file
@@ -108,32 +107,10 @@ class ExecutionAgent:
 
         return base_prompt
 
-    # Format current instruction as user message for LLM consumption
-    def build_messages_for_llm(self, current_instruction: str) -> List[Dict[str, str]]:
-        """
-        Build message array for LLM call.
-
-        Args:
-            current_instruction: Current instruction from interaction agent
-
-        Returns:
-            List of messages in OpenRouter format
-        """
-        return [
-            {"role": "user", "content": current_instruction}
-        ]
-
     # Log the agent's final response to the execution log store
     def record_response(self, response: str) -> None:
         """Record agent's response to the log."""
         self._log_store.record_agent_response(self.storage_key, response)
-
-    # Log tool invocation and results with truncated content for readability
-    def record_tool_execution(self, tool_name: str, arguments: str, result: str) -> None:
-        """Record tool execution details."""
-        self._log_store.record_action(self.storage_key, f"Calling {tool_name} with: {arguments[:200]}")
-        # Record the tool response
-        self._log_store.record_tool_response(self.storage_key, tool_name, result[:500])
 
     def record_request(self, instructions: str) -> None:
         """Record the current request under the tenant-scoped storage key."""

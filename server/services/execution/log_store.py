@@ -117,10 +117,6 @@ class ExecutionAgentLogStore:
         """Record an agent action (tool call)."""
         self._append(agent_name, "agent_action", description)
 
-    def record_tool_response(self, agent_name: str, tool_name: str, response: str) -> None:
-        """Record the response from a tool."""
-        self._append(agent_name, "tool_response", f"{tool_name}: {response}")
-
     def record_agent_response(self, agent_name: str, response: str) -> None:
         """Record the agent's final response."""
         self._append(agent_name, "agent_response", response)

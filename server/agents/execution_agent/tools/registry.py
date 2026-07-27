@@ -32,7 +32,7 @@ def get_tool_registry(
 
     registry: Dict[str, Callable[..., Any]] = {}
     registry.update(gmail.build_registry(agent_name, composio_user_id))
-    registry.update(get_task_registry(agent_name))
+    registry.update(get_task_registry(agent_name, composio_user_id))
     registry.update(
         triggers.build_registry(
             agent_name,

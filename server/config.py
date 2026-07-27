@@ -67,6 +67,12 @@ class Settings(BaseModel):
     )
     jwt_issuer: Optional[str] = Field(default=os.getenv("OPENPOKE_JWT_ISSUER"))
     jwt_audience: Optional[str] = Field(default=os.getenv("OPENPOKE_JWT_AUDIENCE"))
+    allowed_chat_tenant_id: Optional[str] = Field(
+        default=os.getenv("OPENPOKE_CHAT_ALLOWED_TENANT_ID")
+    )
+    allowed_chat_actor_id: Optional[str] = Field(
+        default=os.getenv("OPENPOKE_CHAT_ALLOWED_ACTOR_ID")
+    )
 
     # HTTP behaviour
     cors_allow_origins_raw: str = Field(default=os.getenv("OPENPOKE_CORS_ALLOW_ORIGINS", "*"))

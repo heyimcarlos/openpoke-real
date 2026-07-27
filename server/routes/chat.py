@@ -32,6 +32,18 @@ def get_chat_jwt_verifier() -> JwtPrincipalVerifier:
         ) from None
 
 
+def get_allowed_chat_principal() -> tuple[str, str]:
+    settings = get_settings()
+    tenant_id = (settings.allowed_chat_tenant_id or "").strip()
+    actor_id = (settings.allowed_chat_actor_id or "").strip()
+    if not tenant_id or not actor_id:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Chat principal binding is not configured",
+        )
+    return tenant_id, actor_id
+
+
 async def get_chat_task_service() -> TaskService:
     try:
         return await get_shared_task_service()
@@ -45,6 +57,7 @@ async def get_chat_task_service() -> TaskService:
 def require_chat_principal(
     authorization: Annotated[str | None, Header()] = None,
     verifier: JwtPrincipalVerifier = Depends(get_chat_jwt_verifier),
+    allowed_principal: tuple[str, str] = Depends(get_allowed_chat_principal),
 ) -> Principal:
     if authorization is None or not authorization.startswith("Bearer "):
         raise HTTPException(
@@ -71,6 +84,11 @@ def require_chat_principal(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Missing required scope: chat:send",
+        )
+    if (principal.tenant_id, principal.actor_id) != allowed_principal:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Token principal is not authorized for this chat",
         )
     return principal
 

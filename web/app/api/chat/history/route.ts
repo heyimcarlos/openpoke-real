@@ -1,7 +1,14 @@
+import { rejectInProduction } from '@/lib/localDevelopmentProxy';
+
 const serverBase = process.env.PY_SERVER_URL || 'http://localhost:8001';
 const historyPath = `${serverBase.replace(/\/$/, '')}/api/v1/chat/history`;
 
 async function forward(method: 'GET' | 'DELETE') {
+  const productionRejection = rejectInProduction();
+  if (productionRejection) {
+    return productionRejection;
+  }
+
   const bearerToken = process.env.OPENPOKE_WEB_BEARER_TOKEN;
   if (!bearerToken) {
     return new Response(

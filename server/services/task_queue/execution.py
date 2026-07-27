@@ -83,7 +83,4 @@ class SyntheticExecutor:
                 TaskFailure(code=FailureCode.SYNTHETIC_RETRYABLE)
             )
 
-        return {
-            "agent_name": lease.agent_name,
-            "response": "synthetic task completed",
-        }
+        return {"response": "synthetic task completed"}

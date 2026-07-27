@@ -44,6 +44,10 @@ def chat_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, list[object]]:
             audience=AUDIENCE,
         )
     )
+    app.dependency_overrides[chat_route.get_allowed_chat_principal] = lambda: (
+        "tenant-a",
+        "user-7",
+    )
     task_service = object()
     app.dependency_overrides[chat_route.get_chat_task_service] = lambda: task_service
     captured: list[object] = []
@@ -121,6 +125,91 @@ async def test_chat_derives_principal_from_bearer_and_forwards_stable_turn(
     assert principal.scopes == frozenset({"chat:send", "tasks:create"})
     assert principal.composio_user_id == "local-openpoke-user"
     assert task_service is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {"tenant_id": "tenant-b"},
+        {"sub": "user-8"},
+    ],
+)
+async def test_chat_rejects_valid_token_for_other_principal(
+    chat_app: tuple[FastAPI, list[object]],
+    claims: dict[str, str],
+) -> None:
+    app, captured = chat_app
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/api/v1/chat/send",
+            headers={"Authorization": f"Bearer {_token(**claims)}"},
+            json={
+                "turn_id": "turn-client-stable-7",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 403
+    assert response.json()["error"] == (
+        "Token principal is not authorized for this chat"
+    )
+    assert captured == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tenant_id", "actor_id"),
+    [
+        (None, "user-7"),
+        ("tenant-a", None),
+    ],
+)
+async def test_chat_is_unavailable_without_complete_principal_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    tenant_id: str | None,
+    actor_id: str | None,
+) -> None:
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(chat_route.router, prefix="/api/v1")
+    app.dependency_overrides[chat_route.get_chat_jwt_verifier] = lambda: (
+        JwtPrincipalVerifier(
+            signing_key=SIGNING_KEY,
+            issuer=ISSUER,
+            audience=AUDIENCE,
+        )
+    )
+    monkeypatch.setattr(
+        chat_route,
+        "get_settings",
+        lambda: type(
+            "Settings",
+            (),
+            {
+                "allowed_chat_tenant_id": tenant_id,
+                "allowed_chat_actor_id": actor_id,
+            },
+        )(),
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            "/api/v1/chat/history",
+            headers={"Authorization": f"Bearer {_token()}"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["error"] == (
+        "Chat principal binding is not configured"
+    )
 
 
 @pytest.mark.asyncio

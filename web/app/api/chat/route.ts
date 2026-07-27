@@ -1,3 +1,5 @@
+import { rejectInProduction } from '@/lib/localDevelopmentProxy';
+
 export const runtime = 'nodejs';
 
 type UIMsgPart = { type: string; text?: string };
@@ -20,6 +22,11 @@ function uiToOpenAIContent(messages: UIMessage[]): { role: string; content: stri
 }
 
 export async function POST(req: Request) {
+  const productionRejection = rejectInProduction();
+  if (productionRejection) {
+    return productionRejection;
+  }
+
   let body: any;
   try {
     body = await req.json();

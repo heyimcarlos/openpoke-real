@@ -121,11 +121,6 @@ class PostgresTaskLedger:
     ) -> TaskRecord:
         serialized_input = canonical_json(command.input)
         fingerprint = _request_fingerprint(principal, command, serialized_input)
-        legacy_fingerprint = _legacy_request_fingerprint(
-            principal,
-            command,
-            serialized_input,
-        )
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 await connection.execute(
@@ -148,12 +143,7 @@ class PostgresTaskLedger:
                     command.idempotency_key,
                 )
                 if existing is not None:
-                    if not _fingerprint_matches(
-                        existing["request_fingerprint"],
-                        fingerprint,
-                        legacy_fingerprint,
-                        command.executor_kind,
-                    ):
+                    if existing["request_fingerprint"] != fingerprint:
                         raise IdempotencyConflict(
                             "idempotency key already identifies different task input"
                         )
@@ -250,12 +240,7 @@ class PostgresTaskLedger:
                         raise RuntimeError(
                             "conflicting task acceptance record disappeared"
                         )
-                    if not _fingerprint_matches(
-                        row["request_fingerprint"],
-                        fingerprint,
-                        legacy_fingerprint,
-                        command.executor_kind,
-                    ):
+                    if row["request_fingerprint"] != fingerprint:
                         raise IdempotencyConflict(
                             "idempotency key already identifies different task input"
                         )
@@ -474,32 +459,6 @@ def _request_fingerprint(
         semantic_request["executor_kind"] = command.executor_kind.value
     canonical = canonical_json(semantic_request)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _legacy_request_fingerprint(
-    principal: Principal,
-    command: SubmitTask,
-    serialized_input: str,
-) -> str:
-    semantic_request = {
-        "actor_id": principal.actor_id,
-        "agent_name": command.agent_name,
-        "input_json": serialized_input,
-        "origin_turn_id": command.origin_turn_id,
-    }
-    canonical = canonical_json(semantic_request)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _fingerprint_matches(
-    stored: str,
-    current: str,
-    legacy: str,
-    executor_kind: ExecutorKind,
-) -> bool:
-    return stored == current or (
-        executor_kind is ExecutorKind.AGENT and stored == legacy
-    )
 
 
 def _task_from_row(row: asyncpg.Record) -> TaskRecord:

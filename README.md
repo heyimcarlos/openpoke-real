@@ -38,6 +38,9 @@ OpenPoke is a simplified, open-source take on [Interaction Company’s](https://
    - Use one local Composio user ID in `OPENPOKE_LOCAL_COMPOSIO_USER_ID`.
      The signed local bearer token must carry the same value in its
      `composio_user_id` claim.
+   - Keep `OPENPOKE_CHAT_ALLOWED_TENANT_ID` and
+     `OPENPOKE_CHAT_ALLOWED_ACTOR_ID` set to the single local principal.
+     The token helper uses these values by default.
 4. **Start local PostgreSQL:**
    ```bash
    docker compose --env-file compose.test.env -f compose.test.yaml up -d --wait
@@ -49,10 +52,13 @@ OpenPoke is a simplified, open-source take on [Interaction Company’s](https://
    ```
 6. **Mint a short-lived local chat token.**
    ```bash
-   uv run --locked python scripts/mint_local_chat_token.py
+   uv run --locked python -m scripts.mint_local_chat_token
    ```
    Copy the output into `OPENPOKE_WEB_BEARER_TOKEN` in `.env`. The token is
-   loaded only by the server-side Next.js proxy.
+   loaded only by the server-side Next.js proxy. This token and
+   `OPENPOKE_LOCAL_COMPOSIO_USER_ID` are single-user development shims. The
+   proxy rejects them when `NODE_ENV=production`. A production UI must
+   authenticate each browser user and resolve that identity server-side.
 7. **Install frontend dependencies:**
    ```bash
    npm install --prefix web
@@ -81,6 +87,12 @@ completion but before conversation projection can omit the UI update. A worker
 crash after an external tool side effect but before database completion can
 redeliver that side effect. Durable conversation turns and effect idempotency
 remain later work.
+
+The file-backed conversation and orchestrator state is one shared thread, not
+tenant-partitioned storage. Chat authentication therefore fails closed unless
+one allowed tenant and actor are configured, and rejects valid tokens for any
+other principal. Multi-principal chat requires durable, tenant-scoped
+conversation state.
 
 The durable worker never falls back to process-global Gmail state. The local
 token's signed `composio_user_id` claim must match the server-side OAuth user ID.

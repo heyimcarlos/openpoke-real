@@ -22,7 +22,11 @@ from .tools import get_tool_registry, get_tool_schemas
 class AgentExecutionOutput(BaseModel):
     """Typed result returned to the durable worker."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        str_strip_whitespace=True,
+    )
 
     response: str = Field(min_length=1)
 
@@ -34,7 +38,8 @@ class _AgentTaskInput(BaseModel):
     composio_user_id: str | None = Field(default=None, max_length=256)
     execution_storage_key: str | None = Field(
         default=None,
-        pattern=r"^agent-[a-f0-9]{64}$",
+        max_length=128,
+        pattern=r"^[^\x00-\x1f\x7f]+$",
     )
 
 
@@ -103,7 +108,6 @@ class AgentsSdkExecutor:
             instructions=instructions,
             model=self._model,
             tools=tools,
-            output_type=AgentExecutionOutput,
         )
         result = await self._runner.run(
             agent,
@@ -118,11 +122,8 @@ class AgentsSdkExecutor:
             raise ExecutionFailure(
                 TaskFailure(code=FailureCode.AGENT_NON_RETRYABLE)
             )
-        output = AgentExecutionOutput.model_validate(result.final_output)
-        return {
-            "agent_name": lease.agent_name,
-            "response": output.response,
-        }
+        output = AgentExecutionOutput(response=result.final_output)
+        return {"response": output.response}
 
     def _build_tools(
         self,

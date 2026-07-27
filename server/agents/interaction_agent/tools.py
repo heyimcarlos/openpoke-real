@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from ...logging_config import logger
 from ...services.conversation import get_conversation_log
-from ...services.execution import get_agent_roster, get_execution_agent_logs
+from ...services.execution import get_agent_roster
 from ...services.task_queue import (
     AdmissionRejected,
     ExecutorKind,

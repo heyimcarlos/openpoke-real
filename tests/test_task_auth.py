@@ -17,6 +17,18 @@ ISSUER = "https://auth.openpoke.test"
 AUDIENCE = "openpoke-api"
 
 
+def test_jwt_verifier_rejects_short_hs256_signing_key() -> None:
+    with pytest.raises(
+        ValueError,
+        match="at least 32 bytes",
+    ):
+        JwtPrincipalVerifier(
+            signing_key="too-short",
+            issuer=ISSUER,
+            audience=AUDIENCE,
+        )
+
+
 def _token(**overrides: object) -> str:
     now = datetime.now(timezone.utc)
     claims: dict[str, object] = {

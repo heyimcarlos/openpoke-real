@@ -8,6 +8,7 @@ from typing import Optional, Set
 
 from ..logging_config import logger
 from .task_queue import (
+    AdmissionRejected,
     ExecutorKind,
     Principal,
     SubmitTask,
@@ -131,12 +132,32 @@ class TriggerScheduler:
                         "composio_user_id": trigger.composio_user_id,
                         "execution_storage_key": (
                             trigger.agent_name
-                            if trigger.agent_name.startswith("agent-")
+                            if (
+                                trigger.agent_name.startswith("agent-")
+                                or (
+                                    trigger.tenant_id is None
+                                    and trigger.actor_id is None
+                                )
+                            )
                             else None
                         ),
                     },
                 ),
             )
+        except asyncio.CancelledError:
+            self._in_flight.discard(trigger.id)
+            raise
+        except AdmissionRejected as exc:
+            logger.info(
+                "Trigger task admission deferred",
+                extra={
+                    "trigger_id": trigger.id,
+                    "agent": trigger.agent_name,
+                    "retry_after_seconds": exc.retry_after_seconds,
+                },
+            )
+            self._in_flight.discard(trigger.id)
+            return
         except Exception:  # pragma: no cover - defensive
             self._handle_failure(
                 trigger,
