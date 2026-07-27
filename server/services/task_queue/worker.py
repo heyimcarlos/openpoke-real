@@ -19,6 +19,7 @@ class WorkerOutcomeStatus(str, Enum):
     COMPLETED = "completed"
     RETRIED = "retried"
     DEAD_LETTERED = "dead_lettered"
+    CANCELLED = "cancelled"
     STALE = "stale"
     PROJECTION_FAILED = "projection_failed"
 
@@ -124,11 +125,13 @@ class TaskWorker:
         except StaleLease:
             return self._stale_outcome(lease)
 
-        status = (
-            WorkerOutcomeStatus.RETRIED
-            if record.status is TaskStatus.QUEUED
-            else WorkerOutcomeStatus.DEAD_LETTERED
-        )
+        match record.status:
+            case TaskStatus.QUEUED:
+                status = WorkerOutcomeStatus.RETRIED
+            case TaskStatus.CANCELLED:
+                status = WorkerOutcomeStatus.CANCELLED
+            case _:
+                status = WorkerOutcomeStatus.DEAD_LETTERED
         return WorkerOutcome(
             status=status,
             task_id=lease.task_id,

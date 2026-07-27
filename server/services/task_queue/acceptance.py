@@ -56,12 +56,16 @@ class TaskAdmission:
         *,
         origin_thread_id: UUID | None = None,
         origin_agent_run_id: UUID | None = None,
+        initial_status: TaskStatus = TaskStatus.QUEUED,
     ) -> TaskRecord:
+        if initial_status not in {TaskStatus.BLOCKED, TaskStatus.QUEUED}:
+            raise ValueError("accepted tasks must start blocked or queued")
         serialized_input = canonical_json(command.input)
         fingerprint = task_request_fingerprint(
             principal,
             command,
             serialized_input,
+            initial_status,
         )
         await connection.execute(
             "SELECT pg_advisory_xact_lock($1, hashtext($2))",
@@ -89,7 +93,7 @@ class TaskAdmission:
             SELECT count(*)
             FROM execution_tasks
             WHERE tenant_id = $1
-              AND status IN ('queued', 'running')
+              AND status IN ('blocked', 'queued', 'running')
             """,
             principal.tenant_id,
         )
@@ -126,9 +130,10 @@ class TaskAdmission:
                     request_fingerprint,
                     origin_turn_id,
                     agent_name,
-                    input
+                    input,
+                    status
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
                 ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
                 RETURNING *
                 """,
@@ -139,6 +144,7 @@ class TaskAdmission:
                 command.origin_turn_id,
                 command.agent_name,
                 serialized_input,
+                initial_status.value,
             )
         elif "origin_thread_id" not in columns:
             if origin_thread_id is not None or origin_agent_run_id is not None:
@@ -153,9 +159,10 @@ class TaskAdmission:
                     origin_turn_id,
                     agent_name,
                     executor_kind,
-                    input
+                    input,
+                    status
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
                 ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
                 RETURNING *
                 """,
@@ -167,6 +174,7 @@ class TaskAdmission:
                 command.agent_name,
                 command.executor_kind.value,
                 serialized_input,
+                initial_status.value,
             )
         else:
             row = await connection.fetchrow(
@@ -181,9 +189,12 @@ class TaskAdmission:
                     executor_kind,
                     input,
                     origin_thread_id,
-                    origin_agent_run_id
+                    origin_agent_run_id,
+                    status
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
+                VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11
+                )
                 ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
                 RETURNING *
                 """,
@@ -197,6 +208,7 @@ class TaskAdmission:
                 serialized_input,
                 origin_thread_id,
                 origin_agent_run_id,
+                initial_status.value,
             )
         if row is None:
             row = await connection.fetchrow(
@@ -234,6 +246,7 @@ def task_request_fingerprint(
     principal: Principal,
     command: SubmitTask,
     serialized_input: str,
+    initial_status: TaskStatus = TaskStatus.QUEUED,
 ) -> str:
     semantic_request = {
         "actor_id": principal.actor_id,
@@ -243,6 +256,8 @@ def task_request_fingerprint(
     }
     if command.executor_kind is not ExecutorKind.AGENT:
         semantic_request["executor_kind"] = command.executor_kind.value
+    if initial_status is not TaskStatus.QUEUED:
+        semantic_request["initial_status"] = initial_status.value
     canonical = canonical_json(semantic_request)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

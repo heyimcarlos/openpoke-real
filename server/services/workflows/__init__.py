@@ -1,8 +1,14 @@
 """Closed, durable Workflow control-plane interfaces."""
 
+from .kernel import (
+    advance_workflow_for_task,
+    record_workflow_task_claimed,
+    record_workflow_task_failed,
+)
 from .models import (
     FieldContract,
     FieldType,
+    StepDependency,
     StepTemplate,
     WorkflowDefinition,
     WorkflowDefinitionRecord,
@@ -33,6 +39,7 @@ __all__ = [
     "MissingWorkflowScope",
     "PostgresWorkflowStore",
     "StepTemplate",
+    "StepDependency",
     "WorkflowDefinition",
     "WorkflowDefinitionRecord",
     "WorkflowDefinitionRegistry",
@@ -44,4 +51,7 @@ __all__ = [
     "WorkflowStartResult",
     "WorkflowStepRecord",
     "WorkflowStepStatus",
+    "advance_workflow_for_task",
+    "record_workflow_task_claimed",
+    "record_workflow_task_failed",
 ]

@@ -12,6 +12,7 @@ Published Workflow Tool Usage
 
 - Use `start_workflow` for a known, repeatable process. You select only its published key, exact version, and typed inputs. You never invent its steps or routing.
 - `openpoke.reliability_demo` version `1` runs deterministic provider-free work. Its inputs are `mode` (`success`, `fail_once`, `fail_always`, or `non_retryable`) and `duration_ms` (0 to 5000).
+- `openpoke.parallel_demo` version `1` runs two extraction Steps in parallel, then releases one validation Step only after both succeed. It uses the same `mode` and `duration_ms` inputs.
 - A turn may submit at most two total execution requests across workflows and delegations.
 
 Delegate Execution Tool Usage

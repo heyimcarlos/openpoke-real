@@ -9,7 +9,13 @@ from uuid import UUID
 
 import asyncpg
 
-from ..task_queue import Principal, SubmitTask, TaskAdmission, canonical_json
+from ..task_queue import (
+    Principal,
+    SubmitTask,
+    TaskAdmission,
+    TaskStatus,
+    canonical_json,
+)
 from ..threads import AgentRunLease
 from .models import (
     WorkflowDefinition,
@@ -70,7 +76,9 @@ class PostgresWorkflowStore:
         self,
         definition: WorkflowDefinition,
     ) -> WorkflowDefinitionRecord:
-        body = canonical_json(definition.model_dump(mode="json"))
+        body = canonical_json(
+            definition.model_dump(mode="json", exclude_none=True)
+        )
         async with self._pool.acquire() as connection:
             async with connection.transaction():
                 row = await connection.fetchrow(
@@ -204,34 +212,77 @@ class PostgresWorkflowStore:
                 )
                 definition_record = _definition_from_row(definition_row)
                 definition_record.definition.validate_input(command.input)
-                entry = definition_record.definition.entry_step
-                task = await self._admission.accept(
-                    connection,
-                    principal,
-                    SubmitTask(
-                        idempotency_key=f"workflow:{row['instance_id']}:{entry.key}",
-                        origin_turn_id=command.origin_turn_id,
-                        agent_name=entry.agent_name,
-                        executor_kind=entry.executor_kind,
-                        input=command.input,
-                    ),
-                    origin_thread_id=lease.thread_id if lease else None,
-                    origin_agent_run_id=lease.run_id if lease else None,
-                )
-                step = await connection.fetchrow(
-                    """
-                    INSERT INTO workflow_steps (
-                        instance_id,
-                        step_key,
-                        execution_task_id
+                definition = definition_record.definition
+                blocked_keys = {
+                    dependency.step_key
+                    for dependency in definition.dependencies or ()
+                }
+                tasks = []
+                steps = []
+                steps_by_key = {}
+                for position, template in enumerate(
+                    definition.step_templates
+                ):
+                    step_status = (
+                        WorkflowStepStatus.BLOCKED
+                        if template.key in blocked_keys
+                        else WorkflowStepStatus.RUNNABLE
                     )
-                    VALUES ($1, $2, $3)
-                    RETURNING *
-                    """,
-                    row["instance_id"],
-                    entry.key,
-                    task.task_id,
-                )
+                    task = await self._admission.accept(
+                        connection,
+                        principal,
+                        SubmitTask(
+                            idempotency_key=(
+                                f"workflow:{row['instance_id']}:{template.key}"
+                            ),
+                            origin_turn_id=command.origin_turn_id,
+                            agent_name=template.agent_name,
+                            executor_kind=template.executor_kind,
+                            input=command.input,
+                        ),
+                        origin_thread_id=lease.thread_id if lease else None,
+                        origin_agent_run_id=lease.run_id if lease else None,
+                        initial_status=(
+                            TaskStatus.BLOCKED
+                            if step_status is WorkflowStepStatus.BLOCKED
+                            else TaskStatus.QUEUED
+                        ),
+                    )
+                    step = await connection.fetchrow(
+                        """
+                        INSERT INTO workflow_steps (
+                            instance_id,
+                            step_key,
+                            execution_task_id,
+                            step_position,
+                            status
+                        )
+                        VALUES ($1, $2, $3, $4, $5)
+                        RETURNING *
+                        """,
+                        row["instance_id"],
+                        template.key,
+                        task.task_id,
+                        position,
+                        step_status.value,
+                    )
+                    tasks.append(task)
+                    steps.append(step)
+                    steps_by_key[template.key] = step
+                for dependency in definition.dependencies or ():
+                    await connection.execute(
+                        """
+                        INSERT INTO workflow_step_dependencies (
+                            instance_id,
+                            step_id,
+                            prerequisite_step_id
+                        )
+                        VALUES ($1, $2, $3)
+                        """,
+                        row["instance_id"],
+                        steps_by_key[dependency.step_key]["step_id"],
+                        steps_by_key[dependency.prerequisite_key]["step_id"],
+                    )
                 await connection.execute(
                     """
                     INSERT INTO workflow_events (
@@ -245,8 +296,12 @@ class PostgresWorkflowStore:
                     row["instance_id"],
                     canonical_json(
                         {
-                            "step_id": str(step["step_id"]),
-                            "task_id": str(task.task_id),
+                            "step_id": str(steps[0]["step_id"]),
+                            "task_id": str(tasks[0].task_id),
+                            "step_ids": [
+                                str(step["step_id"]) for step in steps
+                            ],
+                            "task_ids": [str(task.task_id) for task in tasks],
                         }
                     ),
                 )
@@ -257,8 +312,8 @@ class PostgresWorkflowStore:
                     )
         return WorkflowStartResult(
             instance=_instance_from_row(row),
-            step=_step_from_row(step),
-            task=task,
+            steps=tuple(_step_from_row(step) for step in steps),
+            tasks=tuple(tasks),
         )
 
     async def get(
@@ -286,17 +341,27 @@ class PostgresWorkflowStore:
             "SELECT * FROM workflow_instances WHERE instance_id = $1",
             instance_id,
         )
-        step = await connection.fetchrow(
-            "SELECT * FROM workflow_steps WHERE instance_id = $1",
+        steps = await connection.fetch(
+            """
+            SELECT *
+            FROM workflow_steps
+            WHERE instance_id = $1
+            ORDER BY step_position
+            """,
             instance_id,
         )
+        tasks = []
+        for step in steps:
+            tasks.append(
+                await self._admission.get(
+                    connection,
+                    step["execution_task_id"],
+                )
+            )
         return WorkflowStartResult(
             instance=_instance_from_row(row),
-            step=_step_from_row(step),
-            task=await self._admission.get(
-                connection,
-                step["execution_task_id"],
-            ),
+            steps=tuple(_step_from_row(step) for step in steps),
+            tasks=tuple(tasks),
         )
 
 
@@ -355,6 +420,7 @@ def _step_from_row(row: asyncpg.Record) -> WorkflowStepRecord:
         step_id=row["step_id"],
         instance_id=row["instance_id"],
         key=row["step_key"],
+        position=row.get("step_position", 0),
         execution_task_id=row["execution_task_id"],
         status=WorkflowStepStatus(row["status"]),
         created_at=row["created_at"],

@@ -9,6 +9,7 @@ from .acceptance import (
 from .ledger import (
     PostgresTaskLedger,
     StaleLease,
+    TaskResultConflict,
 )
 from .models import (
     ExecutorKind,
@@ -39,6 +40,7 @@ __all__ = [
     "TaskAdmission",
     "TaskLease",
     "TaskRecord",
+    "TaskResultConflict",
     "TaskService",
     "TaskStatus",
     "canonical_json",

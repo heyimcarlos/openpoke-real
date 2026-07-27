@@ -15,6 +15,7 @@ MAX_TASK_INPUT_BYTES = 16_384
 
 
 class TaskStatus(str, Enum):
+    BLOCKED = "blocked"
     QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"

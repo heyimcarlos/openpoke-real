@@ -27,6 +27,7 @@ class WorkflowInstanceStatus(str, Enum):
 
 
 class WorkflowStepStatus(str, Enum):
+    BLOCKED = "blocked"
     RUNNABLE = "runnable"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -52,6 +53,21 @@ class StepTemplate(BaseModel):
     executor_kind: ExecutorKind
 
 
+class StepDependency(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    step_key: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    )
+    prerequisite_key: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    )
+
+
 class WorkflowDefinition(BaseModel):
     """Published structure. Callers can select it but cannot alter its graph."""
 
@@ -64,18 +80,68 @@ class WorkflowDefinition(BaseModel):
     )
     version: int = Field(ge=1)
     input_contract: tuple[FieldContract, ...] = Field(max_length=32)
-    entry_step: StepTemplate
+    entry_step: StepTemplate | None = None
+    steps: tuple[StepTemplate, ...] | None = Field(
+        default=None,
+        max_length=32,
+    )
+    dependencies: tuple[StepDependency, ...] | None = Field(
+        default=None,
+        max_length=128,
+    )
 
     @model_validator(mode="after")
-    def _unique_fields(self) -> WorkflowDefinition:
+    def _validate_closed_structure(self) -> WorkflowDefinition:
         names = [field.name for field in self.input_contract]
         if len(names) != len(set(names)):
             raise ValueError("workflow input field names must be unique")
+        if (self.entry_step is None) == (self.steps is None):
+            raise ValueError(
+                "workflow must declare either one entry_step or a steps graph"
+            )
+        if self.entry_step is not None:
+            if self.dependencies:
+                raise ValueError(
+                    "single-step workflows cannot declare dependencies"
+                )
+            return self
+        if not self.steps:
+            raise ValueError("workflow steps graph must not be empty")
+        step_keys = [step.key for step in self.steps]
+        if len(step_keys) != len(set(step_keys)):
+            raise ValueError("workflow step keys must be unique")
+        dependencies = self.dependencies or ()
+        edges = {
+            (edge.step_key, edge.prerequisite_key)
+            for edge in dependencies
+        }
+        if len(edges) != len(dependencies):
+            raise ValueError("workflow dependencies must be unique")
+        known = set(step_keys)
+        if any(
+            edge.step_key not in known or edge.prerequisite_key not in known
+            for edge in dependencies
+        ):
+            raise ValueError("workflow dependency references an unknown step")
+        graph = {key: set() for key in step_keys}
+        for edge in dependencies:
+            graph[edge.step_key].add(edge.prerequisite_key)
+        _validate_acyclic(graph)
         return self
 
     @property
+    def step_templates(self) -> tuple[StepTemplate, ...]:
+        if self.steps is not None:
+            return self.steps
+        if self.entry_step is None:
+            raise RuntimeError("validated workflow has no steps")
+        return (self.entry_step,)
+
+    @property
     def content_hash(self) -> str:
-        body = canonical_json(self.model_dump(mode="json"))
+        body = canonical_json(
+            self.model_dump(mode="json", exclude_none=True)
+        )
         return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
     def validate_input(self, value: dict[str, JsonValue]) -> None:
@@ -143,6 +209,7 @@ class WorkflowStepRecord:
     step_id: UUID
     instance_id: UUID
     key: str
+    position: int
     execution_task_id: UUID
     status: WorkflowStepStatus
     created_at: datetime
@@ -151,5 +218,32 @@ class WorkflowStepRecord:
 @dataclass(frozen=True)
 class WorkflowStartResult:
     instance: WorkflowInstanceRecord
-    step: WorkflowStepRecord
-    task: TaskRecord
+    steps: tuple[WorkflowStepRecord, ...]
+    tasks: tuple[TaskRecord, ...]
+
+    @property
+    def step(self) -> WorkflowStepRecord:
+        return self.steps[0]
+
+    @property
+    def task(self) -> TaskRecord:
+        return self.tasks[0]
+
+
+def _validate_acyclic(graph: dict[str, set[str]]) -> None:
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(step_key: str) -> None:
+        if step_key in visiting:
+            raise ValueError("workflow dependencies must be acyclic")
+        if step_key in visited:
+            return
+        visiting.add(step_key)
+        for prerequisite in graph[step_key]:
+            visit(prerequisite)
+        visiting.remove(step_key)
+        visited.add(step_key)
+
+    for step_key in graph:
+        visit(step_key)
