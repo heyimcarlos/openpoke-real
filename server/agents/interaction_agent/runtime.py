@@ -150,6 +150,7 @@ class InteractionAgentRuntime:
         """Iteratively query the LLM until it issues a final response."""
 
         summary = _LoopSummary()
+        delegations_attempted = 0
 
         for iteration in range(self.MAX_TOOL_ITERATIONS):
             response = await self._make_llm_call(system_prompt, messages)
@@ -176,12 +177,33 @@ class InteractionAgentRuntime:
             for tool_call in parsed_tool_calls:
                 summary.tool_names.append(tool_call.name)
 
-                if tool_call.name == "send_message_to_agent":
+                if (
+                    tool_call.name == "delegate_execution"
+                    and delegations_attempted >= 2
+                ):
+                    result = ToolResult(
+                        success=False,
+                        payload={
+                            "error": (
+                                "At most two execution delegations are allowed per "
+                                "interaction turn"
+                            )
+                        },
+                    )
+                    self._log_tool_invocation(
+                        tool_call,
+                        stage="rejected",
+                        detail={"error": result.payload["error"]},
+                    )
+                else:
+                    if tool_call.name == "delegate_execution":
+                        delegations_attempted += 1
+                    result = await self._execute_tool(tool_call)
+
+                if tool_call.name == "delegate_execution" and result.success:
                     agent_name = tool_call.arguments.get("agent_name")
                     if isinstance(agent_name, str) and agent_name:
                         summary.execution_agents.add(agent_name)
-
-                result = await self._execute_tool(tool_call)
 
                 if result.user_message:
                     summary.user_messages.append(result.user_message)

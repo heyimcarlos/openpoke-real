@@ -1,4 +1,4 @@
-"""Simple agent roster management - just a list of agent names."""
+"""File-backed names for reusable logical execution contexts."""
 
 import json
 import fcntl
@@ -9,7 +9,7 @@ from ...logging_config import logger
 
 
 class AgentRoster:
-    """Simple roster that stores agent names in a JSON file."""
+    """Store logical context names, not resident agent processes."""
 
     def __init__(self, roster_path: Path):
         self._roster_path = roster_path
@@ -61,10 +61,11 @@ class AgentRoster:
                 break
 
     def add_agent(self, agent_name: str) -> None:
-        """Add an agent to the roster if not already present."""
-        if agent_name not in self._agents:
-            self._agents.append(agent_name)
-            self.save()
+        """Touch a context name, keeping most recently used at the end."""
+        if agent_name in self._agents:
+            self._agents.remove(agent_name)
+        self._agents.append(agent_name)
+        self.save()
 
     def get_agents(self) -> list[str]:
         """Get list of all agent names."""
