@@ -160,7 +160,7 @@ def _fetch_profile_from_composio(user_id: Optional[str]) -> Optional[Dict[str, A
     except RuntimeError as exc:
         logger.warning("GMAIL_GET_PROFILE invocation failed: %s", exc)
         return None
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception:  # pragma: no cover - defensive
         logger.exception("Unexpected error fetching Gmail profile", extra={"user_id": sanitized})
         return None
 

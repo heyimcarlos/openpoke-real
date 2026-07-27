@@ -109,7 +109,7 @@ async def task_email_search(
         return {"error": error}
     
     if not composio_user_id:
-        logger.error(f"[EMAIL_SEARCH] Gmail not connected")
+        logger.error("[EMAIL_SEARCH] Gmail not connected")
         return {"error": ERROR_GMAIL_NOT_CONNECTED}
     
     api_key, model_or_error = _validate_openrouter_config()
@@ -180,7 +180,7 @@ async def _run_email_search(
         
         # Handle case where LLM doesn't make tool calls
         if not tool_calls:
-            logger.info(f"[EMAIL_SEARCH] LLM completed search - no more queries needed")
+            logger.info("[EMAIL_SEARCH] LLM completed search - no more queries needed")
             selected_ids = []
             break
         
@@ -306,7 +306,7 @@ async def _perform_search(
 ) -> EmailSearchToolResult:
     query = (arguments.get("query") or "").strip()
     if not query:
-        logger.warning(f"[EMAIL_SEARCH] Search called with empty query")
+        logger.warning("[EMAIL_SEARCH] Search called with empty query")
         return EmailSearchToolResult(
             status="error",
             error=ERROR_QUERY_REQUIRED,

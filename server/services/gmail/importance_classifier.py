@@ -105,7 +105,7 @@ async def classify_email_importance(email: ProcessedEmail) -> Optional[str]:
             extra={"message_id": email.id, "error": str(exc)},
         )
         return None
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception:  # pragma: no cover - defensive
         logger.exception(
             "Unexpected error during importance classification",
             extra={"message_id": email.id},
