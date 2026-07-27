@@ -5,14 +5,14 @@ from fastapi.responses import JSONResponse
 
 from ..config import get_settings
 from ..models import ChatHistoryClearResponse, ChatHistoryResponse, ChatRequest
-from ..services import get_conversation_log, get_trigger_service, handle_chat_request
+from ..services import handle_chat_request
 from ..services.task_queue import (
     InvalidToken,
     JwtPrincipalVerifier,
     Principal,
-    TaskService,
 )
-from ..services.task_queue.provider import get_shared_task_service
+from ..services.task_queue.provider import get_shared_thread_ledger
+from ..services.threads import PostgresThreadLedger
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -44,13 +44,13 @@ def get_allowed_chat_principal() -> tuple[str, str]:
     return tenant_id, actor_id
 
 
-async def get_chat_task_service() -> TaskService:
+async def get_chat_thread_ledger() -> PostgresThreadLedger:
     try:
-        return await get_shared_task_service()
+        return await get_shared_thread_ledger()
     except RuntimeError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Task service is not configured",
+            detail="Thread service is not configured",
         ) from None
 
 
@@ -98,7 +98,7 @@ def require_chat_principal(
 async def chat_send(
     payload: ChatRequest,
     principal: Principal = Depends(require_chat_principal),
-    task_service: TaskService = Depends(get_chat_task_service),
+    thread_ledger: PostgresThreadLedger = Depends(get_chat_thread_ledger),
 ) -> JSONResponse:
     task_principal = Principal(
         actor_id=principal.actor_id,
@@ -109,45 +109,40 @@ async def chat_send(
     return await handle_chat_request(
         payload,
         principal=task_principal,
-        task_service=task_service,
+        thread_ledger=thread_ledger,
     )
 
 
 @router.get(
     "/history",
     response_model=ChatHistoryResponse,
-    dependencies=[Depends(require_chat_principal)],
 )
-# Retrieve the conversation history from the log
-def chat_history() -> ChatHistoryResponse:
-    log = get_conversation_log()
-    return ChatHistoryResponse(messages=log.to_chat_messages())
+async def chat_history(
+    principal: Principal = Depends(require_chat_principal),
+    thread_ledger: PostgresThreadLedger = Depends(get_chat_thread_ledger),
+) -> ChatHistoryResponse:
+    messages = await thread_ledger.list_messages(principal)
+    return ChatHistoryResponse(
+        messages=[
+            {
+                "role": message.role if message.role != "agent" else "assistant",
+                "content": message.content,
+                "timestamp": message.created_at.isoformat(),
+            }
+            for message in messages
+        ]
+    )
 
 
 @router.delete(
     "/history",
     response_model=ChatHistoryClearResponse,
-    dependencies=[Depends(require_chat_principal)],
 )
-def clear_history() -> ChatHistoryClearResponse:
-    from ..services import get_execution_agent_logs, get_agent_roster
-
-    # Clear conversation log
-    log = get_conversation_log()
-    log.clear()
-
-    # Clear execution agent logs
-    execution_logs = get_execution_agent_logs()
-    execution_logs.clear_all()
-
-    # Clear agent roster
-    roster = get_agent_roster()
-    roster.clear()
-
-    # Clear stored triggers
-    trigger_service = get_trigger_service()
-    trigger_service.clear_all()
-
+async def clear_history(
+    principal: Principal = Depends(require_chat_principal),
+    thread_ledger: PostgresThreadLedger = Depends(get_chat_thread_ledger),
+) -> ChatHistoryClearResponse:
+    await thread_ledger.clear(principal)
     return ChatHistoryClearResponse()
 
 

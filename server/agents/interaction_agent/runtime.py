@@ -56,6 +56,8 @@ class InteractionAgentRuntime:
         self,
         *,
         tool_context: InteractionToolContext | None = None,
+        transcript: str | None = None,
+        persist_locally: bool = True,
     ) -> None:
         settings = get_settings()
         self.api_key = settings.openrouter_api_key
@@ -65,6 +67,8 @@ class InteractionAgentRuntime:
         self.working_memory_log = get_working_memory_log()
         self.tool_schemas = get_tool_schemas()
         self.tool_context = tool_context
+        self._transcript = transcript
+        self._persist_locally = persist_locally
 
         if not self.api_key:
             raise ValueError(
@@ -77,7 +81,8 @@ class InteractionAgentRuntime:
 
         try:
             transcript_before = self._load_conversation_transcript()
-            self.conversation_log.record_user_message(user_message)
+            if self._persist_locally:
+                self.conversation_log.record_user_message(user_message)
 
             system_prompt = build_system_prompt()
             messages = prepare_message_with_history(
@@ -89,7 +94,11 @@ class InteractionAgentRuntime:
 
             final_response = self._finalize_response(summary)
 
-            if final_response and not summary.user_messages:
+            if (
+                self._persist_locally
+                and final_response
+                and not summary.user_messages
+            ):
                 self.conversation_log.record_reply(final_response)
 
             return InteractionResult(
@@ -112,7 +121,8 @@ class InteractionAgentRuntime:
 
         try:
             transcript_before = self._load_conversation_transcript()
-            self.conversation_log.record_agent_message(agent_message)
+            if self._persist_locally:
+                self.conversation_log.record_agent_message(agent_message)
 
             system_prompt = build_system_prompt()
             messages = prepare_message_with_history(
@@ -124,7 +134,11 @@ class InteractionAgentRuntime:
 
             final_response = self._finalize_response(summary)
 
-            if final_response and not summary.user_messages:
+            if (
+                self._persist_locally
+                and final_response
+                and not summary.user_messages
+            ):
                 self.conversation_log.record_reply(final_response)
 
             return InteractionResult(
@@ -224,6 +238,8 @@ class InteractionAgentRuntime:
 
     # Load conversation history, preferring summarized version if available
     def _load_conversation_transcript(self) -> str:
+        if self._transcript is not None:
+            return self._transcript
         if self.settings.summarization_enabled:
             rendered = self.working_memory_log.render_transcript()
             if rendered.strip():

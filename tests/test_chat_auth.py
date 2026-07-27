@@ -48,12 +48,21 @@ def chat_app(monkeypatch: pytest.MonkeyPatch) -> tuple[FastAPI, list[object]]:
         "tenant-a",
         "user-7",
     )
-    task_service = object()
-    app.dependency_overrides[chat_route.get_chat_task_service] = lambda: task_service
+    class FakeThreadLedger:
+        async def list_messages(self, _principal):
+            return []
+
+        async def clear(self, _principal):
+            return None
+
+    thread_ledger = FakeThreadLedger()
+    app.dependency_overrides[chat_route.get_chat_thread_ledger] = lambda: (
+        thread_ledger
+    )
     captured: list[object] = []
 
-    async def fake_handle(payload, *, principal, task_service):
-        captured.extend([payload, principal, task_service])
+    async def fake_handle(payload, *, principal, thread_ledger):
+        captured.extend([payload, principal, thread_ledger])
         return PlainTextResponse("", status_code=202)
 
     monkeypatch.setattr(chat_route, "handle_chat_request", fake_handle)
@@ -118,13 +127,13 @@ async def test_chat_derives_principal_from_bearer_and_forwards_stable_turn(
         )
 
     assert response.status_code == 202
-    payload, principal, task_service = captured
+    payload, principal, thread_ledger = captured
     assert payload.turn_id == "turn-client-stable-7"
     assert principal.actor_id == "user-7"
     assert principal.tenant_id == "tenant-a"
     assert principal.scopes == frozenset({"chat:send", "tasks:create"})
     assert principal.composio_user_id == "local-openpoke-user"
-    assert task_service is not None
+    assert thread_ledger is not None
 
 
 @pytest.mark.asyncio

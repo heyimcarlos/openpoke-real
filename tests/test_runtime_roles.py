@@ -15,6 +15,7 @@ from server.database import DatabaseRole, create_role_pool
     ("role", "expected_max_size"),
     [
         (DatabaseRole.API, 5),
+        (DatabaseRole.ORCHESTRATOR, 4),
         (DatabaseRole.WORKER, 4),
         (DatabaseRole.MIGRATOR, 1),
     ],
@@ -77,6 +78,7 @@ def test_worker_cli_wires_local_projection_mode(
     [
         ("server.server", "OpenPoke FastAPI server"),
         ("server.worker", "--no-local-result-projection"),
+        ("server.orchestrator_worker", "OpenPoke orchestrator worker"),
         ("server.migrate", "Apply OpenPoke database migrations"),
     ],
 )

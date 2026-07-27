@@ -75,11 +75,15 @@ OpenPoke is a simplified, open-source take on [Interaction Company’s](https://
    ```bash
    uv run --locked python -m server.worker --concurrency 2
    ```
-11. **Start the Next.js app (new terminal):**
+11. **Start the durable orchestrator worker (new terminal):**
+   ```bash
+   uv run --locked python -m server.orchestrator_worker
+   ```
+12. **Start the Next.js app (new terminal):**
    ```bash
    npm run dev --prefix web
    ```
-12. **Connect Gmail for email workflows.** With the services running, open [http://localhost:3000](http://localhost:3000), head to *Settings → Gmail*, and complete the Composio OAuth flow. This step is required for email drafting, replies, and the important-email monitor.
+13. **Connect Gmail for email workflows.** With the services running, open [http://localhost:3000](http://localhost:3000), head to *Settings → Gmail*, and complete the Composio OAuth flow. This step is required for email drafting, replies, and the important-email monitor.
 
 The web app proxies API calls to the Python server using the values in `.env`, so keeping both processes running is required for end-to-end flows.
 

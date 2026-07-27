@@ -385,28 +385,34 @@ class PostgresTaskLedger:
         result: dict[str, JsonValue],
     ) -> TaskRecord:
         serialized_result = canonical_json(result)
-        row = await self._pool.fetchrow(
-            """
-            UPDATE execution_tasks
-            SET status = 'completed',
-                result = $4::jsonb,
-                failure_code = NULL,
-                lease_owner = NULL,
-                lease_expires_at = NULL
-            WHERE task_id = $1
-              AND status = 'running'
-              AND lease_owner = $2
-              AND lease_generation = $3
-              AND lease_expires_at > clock_timestamp()
-            RETURNING *
-            """,
-            lease.task_id,
-            lease.worker_id,
-            lease.lease_generation,
-            serialized_result,
-        )
-        if row is None:
-            raise StaleLease("task lease is expired or superseded")
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """
+                    UPDATE execution_tasks
+                    SET status = 'completed',
+                        result = $4::jsonb,
+                        failure_code = NULL,
+                        lease_owner = NULL,
+                        lease_expires_at = NULL
+                    WHERE task_id = $1
+                      AND status = 'running'
+                      AND lease_owner = $2
+                      AND lease_generation = $3
+                      AND lease_expires_at > clock_timestamp()
+                    RETURNING *
+                    """,
+                    lease.task_id,
+                    lease.worker_id,
+                    lease.lease_generation,
+                    serialized_result,
+                )
+                if row is None:
+                    raise StaleLease("task lease is expired or superseded")
+                if row.get("origin_thread_id") is not None:
+                    from ..threads.continuation import append_execution_result
+
+                    await append_execution_result(connection, row)
         return _task_from_row(row)
 
     async def fail(
@@ -480,6 +486,8 @@ def _task_from_row(row: asyncpg.Record) -> TaskRecord:
             else None
         ),
         created_at=row["created_at"],
+        origin_thread_id=row.get("origin_thread_id"),
+        origin_agent_run_id=row.get("origin_agent_run_id"),
     )
 
 
@@ -498,4 +506,6 @@ def _lease_from_row(row: asyncpg.Record) -> TaskLease:
         lease_generation=row["lease_generation"],
         worker_id=row["lease_owner"],
         expires_at=row["lease_expires_at"],
+        origin_thread_id=row.get("origin_thread_id"),
+        origin_agent_run_id=row.get("origin_agent_run_id"),
     )
