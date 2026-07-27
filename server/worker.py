@@ -45,6 +45,7 @@ async def _run(
     once: bool,
     poll_interval_seconds: float,
     concurrency: int,
+    project_results_locally: bool,
 ) -> None:
     settings = get_settings()
     if not settings.database_url:
@@ -65,7 +66,11 @@ async def _run(
                 ExecutorKind.SYNTHETIC: SyntheticExecutor(),
             }
         )
-        result_sink = InteractionResultSink(task_service)
+        result_sink = (
+            InteractionResultSink(task_service)
+            if project_results_locally
+            else None
+        )
         workers = [
             TaskWorker(
                 ledger,
@@ -103,6 +108,14 @@ def main() -> None:
         default=2,
         help="Concurrent claim and execution slots, 1 or 2 (default: 2)",
     )
+    parser.add_argument(
+        "--no-local-result-projection",
+        action="store_true",
+        help=(
+            "Keep completed results in PostgreSQL without writing to the "
+            "worker's local conversation files"
+        ),
+    )
     args = parser.parse_args()
     if args.poll_interval <= 0:
         parser.error("--poll-interval must be positive")
@@ -113,6 +126,7 @@ def main() -> None:
             once=args.once,
             poll_interval_seconds=args.poll_interval,
             concurrency=args.concurrency,
+            project_results_locally=not args.no_local_result_projection,
         )
     )
 
