@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import timedelta
 from pathlib import Path
@@ -11,37 +10,24 @@ from uuid import UUID
 import asyncpg
 from pydantic import JsonValue
 
+from .acceptance import (
+    TaskAdmission,
+    task_from_row,
+)
 from .models import (
     ExecutorKind,
-    FailureCode,
     Principal,
     SubmitTask,
     TaskFailure,
     TaskLease,
     TaskRecord,
-    TaskStatus,
     canonical_json,
 )
 
 _CLAIM_CAPACITY_LOCK_ID = 5_716_553_685_489_545
 _MIGRATION_LOCK_ID = 5_716_553_685_489_546
-_TENANT_ADMISSION_LOCK_NAMESPACE = 1_331_862_839
-
-
-class IdempotencyConflict(ValueError):
-    """An idempotency key was reused for different semantic work."""
-
-
 class StaleLease(RuntimeError):
     """A worker no longer holds completion authority for a task."""
-
-
-class AdmissionRejected(RuntimeError):
-    """A tenant has reached its configured outstanding-task limit."""
-
-    def __init__(self, retry_after_seconds: int) -> None:
-        super().__init__("tenant task backlog is full; retry later")
-        self.retry_after_seconds = retry_after_seconds
 
 
 class PostgresTaskLedger:
@@ -69,9 +55,11 @@ class PostgresTaskLedger:
         self._pool = pool
         self._global_active_limit = global_active_limit
         self._tenant_active_limit = tenant_active_limit
-        self._tenant_outstanding_limit = tenant_outstanding_limit
         self._max_attempts = max_attempts
-        self._admission_retry_after_seconds = admission_retry_after_seconds
+        self._admission = TaskAdmission(
+            tenant_outstanding_limit=tenant_outstanding_limit,
+            retry_after_seconds=admission_retry_after_seconds,
+        )
 
     async def migrate(self) -> None:
         migrations_path = (
@@ -119,133 +107,13 @@ class PostgresTaskLedger:
         principal: Principal,
         command: SubmitTask,
     ) -> TaskRecord:
-        serialized_input = canonical_json(command.input)
-        fingerprint = _request_fingerprint(principal, command, serialized_input)
         async with self._pool.acquire() as connection:
             async with connection.transaction():
-                await connection.execute(
-                    """
-                    SELECT pg_advisory_xact_lock(
-                        $1,
-                        hashtext($2)
-                    )
-                    """,
-                    _TENANT_ADMISSION_LOCK_NAMESPACE,
-                    principal.tenant_id,
+                return await self._admission.accept(
+                    connection,
+                    principal,
+                    command,
                 )
-                existing = await connection.fetchrow(
-                    """
-                    SELECT *
-                    FROM execution_tasks
-                    WHERE tenant_id = $1 AND idempotency_key = $2
-                    """,
-                    principal.tenant_id,
-                    command.idempotency_key,
-                )
-                if existing is not None:
-                    if existing["request_fingerprint"] != fingerprint:
-                        raise IdempotencyConflict(
-                            "idempotency key already identifies different task input"
-                        )
-                    return _task_from_row(existing)
-
-                outstanding_count = await connection.fetchval(
-                    """
-                    SELECT count(*)
-                    FROM execution_tasks
-                    WHERE tenant_id = $1
-                      AND status IN ('queued', 'running')
-                    """,
-                    principal.tenant_id,
-                )
-                if outstanding_count >= self._tenant_outstanding_limit:
-                    raise AdmissionRejected(self._admission_retry_after_seconds)
-
-                has_executor_kind = await connection.fetchval(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM pg_attribute
-                        WHERE attrelid = 'execution_tasks'::regclass
-                          AND attname = 'executor_kind'
-                          AND NOT attisdropped
-                    )
-                    """
-                )
-                if has_executor_kind:
-                    row = await connection.fetchrow(
-                        """
-                        INSERT INTO execution_tasks (
-                            tenant_id,
-                            actor_id,
-                            idempotency_key,
-                            request_fingerprint,
-                            origin_turn_id,
-                            agent_name,
-                            executor_kind,
-                            input
-                        )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
-                        ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
-                        RETURNING *
-                        """,
-                        principal.tenant_id,
-                        principal.actor_id,
-                        command.idempotency_key,
-                        fingerprint,
-                        command.origin_turn_id,
-                        command.agent_name,
-                        command.executor_kind.value,
-                        serialized_input,
-                    )
-                else:
-                    if command.executor_kind is not ExecutorKind.AGENT:
-                        raise RuntimeError(
-                            "executor policy migration has not been applied"
-                        )
-                    row = await connection.fetchrow(
-                        """
-                        INSERT INTO execution_tasks (
-                            tenant_id,
-                            actor_id,
-                            idempotency_key,
-                            request_fingerprint,
-                            origin_turn_id,
-                            agent_name,
-                            input
-                        )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-                        ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
-                        RETURNING *
-                        """,
-                        principal.tenant_id,
-                        principal.actor_id,
-                        command.idempotency_key,
-                        fingerprint,
-                        command.origin_turn_id,
-                        command.agent_name,
-                        serialized_input,
-                    )
-                if row is None:
-                    row = await connection.fetchrow(
-                        """
-                        SELECT *
-                        FROM execution_tasks
-                        WHERE tenant_id = $1 AND idempotency_key = $2
-                        """,
-                        principal.tenant_id,
-                        command.idempotency_key,
-                    )
-                    if row is None:
-                        raise RuntimeError(
-                            "conflicting task acceptance record disappeared"
-                        )
-                    if row["request_fingerprint"] != fingerprint:
-                        raise IdempotencyConflict(
-                            "idempotency key already identifies different task input"
-                        )
-
-        return _task_from_row(row)
 
     async def get(self, tenant_id: str, task_id: UUID) -> TaskRecord | None:
         row = await self._pool.fetchrow(
@@ -257,7 +125,7 @@ class PostgresTaskLedger:
             tenant_id,
             task_id,
         )
-        return _task_from_row(row) if row else None
+        return task_from_row(row) if row else None
 
     async def cancel(
         self,
@@ -276,7 +144,7 @@ class PostgresTaskLedger:
             tenant_id,
             task_id,
         )
-        return _task_from_row(row) if row else None
+        return task_from_row(row) if row else None
 
     async def claim(
         self,
@@ -413,7 +281,7 @@ class PostgresTaskLedger:
                     from ..threads.continuation import append_execution_result
 
                     await append_execution_result(connection, row)
-        return _task_from_row(row)
+        return task_from_row(row)
 
     async def fail(
         self,
@@ -447,48 +315,7 @@ class PostgresTaskLedger:
         )
         if row is None:
             raise StaleLease("task lease is expired or superseded")
-        return _task_from_row(row)
-
-
-def _request_fingerprint(
-    principal: Principal,
-    command: SubmitTask,
-    serialized_input: str,
-) -> str:
-    semantic_request = {
-        "actor_id": principal.actor_id,
-        "agent_name": command.agent_name,
-        "input_json": serialized_input,
-        "origin_turn_id": command.origin_turn_id,
-    }
-    if command.executor_kind is not ExecutorKind.AGENT:
-        semantic_request["executor_kind"] = command.executor_kind.value
-    canonical = canonical_json(semantic_request)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _task_from_row(row: asyncpg.Record) -> TaskRecord:
-    return TaskRecord(
-        task_id=row["task_id"],
-        tenant_id=row["tenant_id"],
-        actor_id=row["actor_id"],
-        idempotency_key=row["idempotency_key"],
-        origin_turn_id=row["origin_turn_id"],
-        agent_name=row["agent_name"],
-        executor_kind=ExecutorKind(row.get("executor_kind", ExecutorKind.AGENT.value)),
-        input=json.loads(row["input"]),
-        status=TaskStatus(row["status"]),
-        result=json.loads(row["result"]) if row["result"] is not None else None,
-        attempt_count=row.get("attempt_count", 0),
-        failure=(
-            FailureCode(row["failure_code"])
-            if row.get("failure_code") is not None
-            else None
-        ),
-        created_at=row["created_at"],
-        origin_thread_id=row.get("origin_thread_id"),
-        origin_agent_run_id=row.get("origin_agent_run_id"),
-    )
+        return task_from_row(row)
 
 
 def _lease_from_row(row: asyncpg.Record) -> TaskLease:

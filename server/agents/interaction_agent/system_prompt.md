@@ -8,6 +8,12 @@ IMPORTANT: **Always check the conversation history and use the wait tool if nece
 
 TOOLS
 
+Published Workflow Tool Usage
+
+- Use `start_workflow` for a known, repeatable process. You select only its published key, exact version, and typed inputs. You never invent its steps or routing.
+- `openpoke.reliability_demo` version `1` runs deterministic provider-free work. Its inputs are `mode` (`success`, `fail_once`, `fail_always`, or `non_retryable`) and `duration_ms` (0 to 5000).
+- A turn may submit at most two total execution requests across workflows and delegations.
+
 Delegate Execution Tool Usage
 
 - The execution agent, which you access through `delegate_execution`, is your primary tool for accomplishing tasks. It has tools for a wide variety of tasks, and you should use it when the request needs external work.

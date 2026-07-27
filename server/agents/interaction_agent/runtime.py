@@ -44,6 +44,7 @@ class _LoopSummary:
     user_messages: List[str] = field(default_factory=list)
     tool_names: List[str] = field(default_factory=list)
     execution_agents: Set[str] = field(default_factory=set)
+    recorded_reply: bool = False
 
 
 class InteractionAgentRuntime:
@@ -164,7 +165,7 @@ class InteractionAgentRuntime:
         """Iteratively query the LLM until it issues a final response."""
 
         summary = _LoopSummary()
-        delegations_attempted = 0
+        execution_submissions_attempted = 0
 
         for iteration in range(self.MAX_TOOL_ITERATIONS):
             response = await self._make_llm_call(system_prompt, messages)
@@ -192,8 +193,8 @@ class InteractionAgentRuntime:
                 summary.tool_names.append(tool_call.name)
 
                 if (
-                    tool_call.name == "delegate_execution"
-                    and delegations_attempted >= 2
+                    tool_call.name in {"delegate_execution", "start_workflow"}
+                    and execution_submissions_attempted >= 2
                 ):
                     result = ToolResult(
                         success=False,
@@ -201,6 +202,11 @@ class InteractionAgentRuntime:
                             "error": (
                                 "At most two execution delegations are allowed per "
                                 "interaction turn"
+                                if tool_call.name == "delegate_execution"
+                                else (
+                                    "At most two execution submissions are allowed "
+                                    "per interaction turn"
+                                )
                             )
                         },
                     )
@@ -210,8 +216,11 @@ class InteractionAgentRuntime:
                         detail={"error": result.payload["error"]},
                     )
                 else:
-                    if tool_call.name == "delegate_execution":
-                        delegations_attempted += 1
+                    if tool_call.name in {
+                        "delegate_execution",
+                        "start_workflow",
+                    }:
+                        execution_submissions_attempted += 1
                     result = await self._execute_tool(tool_call)
 
                 if tool_call.name == "delegate_execution" and result.success:
@@ -221,6 +230,8 @@ class InteractionAgentRuntime:
 
                 if result.user_message:
                     summary.user_messages.append(result.user_message)
+                if result.recorded_reply:
+                    summary.recorded_reply = True
 
                 tool_message = {
                     "role": "tool",
@@ -452,5 +463,7 @@ class InteractionAgentRuntime:
 
         if summary.user_messages:
             return summary.user_messages[-1]
+        if summary.recorded_reply:
+            return ""
 
         return summary.last_assistant_text
