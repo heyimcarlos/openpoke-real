@@ -4,8 +4,7 @@ ALTER TABLE execution_tasks
             failure_code IN (
                 'synthetic_retryable',
                 'synthetic_non_retryable',
-                'lease_expired',
-                'attempts_exhausted'
+                'lease_expired'
             )
         );
 

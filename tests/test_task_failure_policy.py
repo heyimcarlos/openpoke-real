@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from pathlib import Path
 
 import asyncpg
 import pytest
@@ -203,6 +204,65 @@ async def test_lowered_attempt_budget_dead_letters_already_exhausted_queue(
         assert requeued.status == "queued"
 
     lowered_policy = PostgresTaskLedger(postgres_pool, max_attempts=3)
+
+    assert await lowered_policy.claim("worker-4", timedelta(minutes=1)) is None
+    reconciled = await lowered_policy.get(
+        principal.tenant_id,
+        accepted.task_id,
+    )
+    assert reconciled is not None
+    assert reconciled.status == "dead_lettered"
+    assert reconciled.failure == FailureCode.ATTEMPTS_EXHAUSTED
+
+
+@pytest.mark.asyncio
+async def test_migration_extends_existing_failure_code_constraint(
+    postgres_pool: asyncpg.Pool,
+) -> None:
+    migrations = (
+        Path(__file__).resolve().parents[1]
+        / "server"
+        / "migrations"
+    )
+    applied_versions = (
+        "001_execution_tasks.sql",
+        "002_task_leases.sql",
+        "003_task_failure_policy.sql",
+    )
+    for version in applied_versions:
+        await postgres_pool.execute(
+            (migrations / version).read_text(encoding="utf-8")
+        )
+    await postgres_pool.execute(
+        """
+        CREATE TABLE openpoke_schema_migrations (
+            version TEXT PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+        )
+        """
+    )
+    await postgres_pool.executemany(
+        """
+        INSERT INTO openpoke_schema_migrations (version)
+        VALUES ($1)
+        """,
+        [(version,) for version in applied_versions],
+    )
+
+    original_policy = PostgresTaskLedger(postgres_pool, max_attempts=4)
+    principal = _principal("tenant-a")
+    accepted = await original_policy.submit(principal, _command(1))
+    failure = TaskFailure(code=FailureCode.SYNTHETIC_RETRYABLE)
+    for attempt in (1, 2, 3):
+        lease = await original_policy.claim(
+            f"worker-{attempt}",
+            timedelta(minutes=1),
+        )
+        assert lease is not None
+        await original_policy.fail(lease, failure)
+
+    lowered_policy = PostgresTaskLedger(postgres_pool, max_attempts=3)
+    await lowered_policy.migrate()
 
     assert await lowered_policy.claim("worker-4", timedelta(minutes=1)) is None
     reconciled = await lowered_policy.get(
