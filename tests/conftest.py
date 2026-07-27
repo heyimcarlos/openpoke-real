@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from uuid import uuid4
 
 import asyncpg
+import pytest
 import pytest_asyncio
 
 from server.services.task_queue import PostgresTaskLedger
@@ -14,6 +15,17 @@ DATABASE_URL = os.getenv(
     "OPENPOKE_TEST_DATABASE_URL",
     "postgresql://postgres@127.0.0.1:55432/openpoke_test",
 )
+
+
+_POSTGRES_FIXTURES = {"database_schema", "postgres_pool", "ledger"}
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Keep PostgreSQL tests in their explicit CI job."""
+
+    for item in items:
+        if _POSTGRES_FIXTURES.intersection(item.fixturenames):
+            item.add_marker(pytest.mark.postgres)
 
 
 @pytest_asyncio.fixture

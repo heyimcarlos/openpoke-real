@@ -6,7 +6,8 @@ import asyncio
 
 import asyncpg
 
-from ...config import get_settings
+from server.config import get_settings
+from server.database import DatabaseRole, create_role_pool
 from .ledger import PostgresTaskLedger
 from .service import TaskService
 
@@ -29,17 +30,8 @@ async def get_shared_task_service() -> TaskService:
         database_url = get_settings().database_url
         if not database_url:
             raise RuntimeError("OPENPOKE_DATABASE_URL is not configured")
-        pool = await asyncpg.create_pool(
-            database_url,
-            min_size=1,
-            max_size=10,
-        )
+        pool = await create_role_pool(database_url, DatabaseRole.API)
         ledger = PostgresTaskLedger(pool)
-        try:
-            await ledger.migrate()
-        except Exception:
-            await pool.close()
-            raise
         _pool = pool
         _service = TaskService(ledger)
         return _service
