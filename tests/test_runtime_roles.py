@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from server import worker as worker_module
 from server.database import DatabaseRole, create_role_pool
 
 
@@ -40,6 +41,35 @@ async def test_runtime_role_uses_its_connection_budget(
         "min_size": 1,
         "max_size": expected_max_size,
     }
+
+
+@pytest.mark.parametrize(
+    ("projection_argument", "expected"),
+    [
+        ([], True),
+        (["--no-local-result-projection"], False),
+    ],
+)
+def test_worker_cli_wires_local_projection_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    projection_argument: list[str],
+    expected: bool,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_run(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(worker_module, "_run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["server.worker", "--once", *projection_argument],
+    )
+
+    worker_module.main()
+
+    assert captured["project_results_locally"] is expected
 
 
 @pytest.mark.parametrize(
