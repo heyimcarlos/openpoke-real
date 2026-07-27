@@ -121,6 +121,10 @@ def _trigger_record_to_payload(record: TriggerRecord) -> Dict[str, Any]:
 def _create_trigger_tool(
     *,
     agent_name: str,
+    display_agent_name: str,
+    tenant_id: str,
+    actor_id: str,
+    composio_user_id: Optional[str],
     payload: str,
     recurrence_rule: Optional[str] = None,
     start_time: Optional[str] = None,
@@ -136,6 +140,10 @@ def _create_trigger_tool(
     try:
         record = _TRIGGER_SERVICE.create_trigger(
             agent_name=agent_name,
+            display_agent_name=display_agent_name,
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            composio_user_id=composio_user_id,
             payload=payload,
             recurrence_rule=recurrence_rule,
             start_time=start_time,
@@ -233,11 +241,25 @@ def _list_triggers_tool(*, agent_name: str) -> Dict[str, Any]:
 
 
 # Return trigger tool callables bound to a specific agent
-def build_registry(agent_name: str) -> Dict[str, Callable[..., Any]]:
+def build_registry(
+    agent_name: str,
+    *,
+    display_agent_name: str,
+    tenant_id: str,
+    actor_id: str,
+    composio_user_id: Optional[str],
+) -> Dict[str, Callable[..., Any]]:
     """Return trigger tool callables bound to a specific agent."""
 
     return {
-        "createTrigger": partial(_create_trigger_tool, agent_name=agent_name),
+        "createTrigger": partial(
+            _create_trigger_tool,
+            agent_name=agent_name,
+            display_agent_name=display_agent_name,
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            composio_user_id=composio_user_id,
+        ),
         "updateTrigger": partial(_update_trigger_tool, agent_name=agent_name),
         "listTriggers": partial(_list_triggers_tool, agent_name=agent_name),
     }

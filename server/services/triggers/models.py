@@ -12,6 +12,10 @@ class TriggerRecord(BaseModel):
 
     id: int
     agent_name: str
+    display_agent_name: Optional[str] = None
+    tenant_id: Optional[str] = None
+    actor_id: Optional[str] = None
+    composio_user_id: Optional[str] = None
     payload: str
     start_time: Optional[str] = None
     next_trigger: Optional[str] = None

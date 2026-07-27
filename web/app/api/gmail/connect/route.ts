@@ -5,7 +5,13 @@ export async function POST(req: Request) {
   try {
     body = await req.json();
   } catch {}
-  const userId = body?.userId || '';
+  const userId = process.env.OPENPOKE_LOCAL_COMPOSIO_USER_ID || '';
+  if (!userId) {
+    return new Response(
+      JSON.stringify({ ok: false, error: 'Gmail identity is not configured' }),
+      { status: 503, headers: { 'Content-Type': 'application/json; charset=utf-8' } },
+    );
+  }
   const authConfigId = body?.authConfigId || '';
 
   const serverBase = process.env.PY_SERVER_URL || 'http://localhost:8001';

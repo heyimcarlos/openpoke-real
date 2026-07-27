@@ -1,5 +1,6 @@
 """Execution Agent implementation."""
 
+import hashlib
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -29,6 +30,15 @@ You have access to Gmail tools to help complete your tasks. When given instructi
 Be thorough, accurate, and efficient in your execution."""
 
 
+def execution_storage_key(
+    tenant_id: str,
+    actor_id: str,
+    agent_name: str,
+) -> str:
+    identity = f"{tenant_id}\x00{actor_id}\x00{agent_name}"
+    return "agent-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
 class ExecutionAgent:
     """Manages state and history for an execution agent."""
 
@@ -36,7 +46,9 @@ class ExecutionAgent:
     def __init__(
         self,
         name: str,
-        conversation_limit: Optional[int] = None
+        conversation_limit: Optional[int] = None,
+        *,
+        storage_key: Optional[str] = None,
     ):
         """
         Initialize an execution agent.
@@ -46,6 +58,7 @@ class ExecutionAgent:
             conversation_limit: Optional limit on past conversations to include (None = all)
         """
         self.name = name
+        self.storage_key = storage_key or name
         self.conversation_limit = conversation_limit
         self._log_store = get_execution_agent_logs()
 
@@ -70,7 +83,7 @@ class ExecutionAgent:
         base_prompt = self.build_system_prompt()
 
         # Load history transcript
-        transcript = self._log_store.load_transcript(self.name)
+        transcript = self._log_store.load_transcript(self.storage_key)
 
         if transcript:
             # Apply conversation limit if needed
@@ -113,11 +126,15 @@ class ExecutionAgent:
     # Log the agent's final response to the execution log store
     def record_response(self, response: str) -> None:
         """Record agent's response to the log."""
-        self._log_store.record_agent_response(self.name, response)
+        self._log_store.record_agent_response(self.storage_key, response)
 
     # Log tool invocation and results with truncated content for readability
     def record_tool_execution(self, tool_name: str, arguments: str, result: str) -> None:
         """Record tool execution details."""
-        self._log_store.record_action(self.name, f"Calling {tool_name} with: {arguments[:200]}")
+        self._log_store.record_action(self.storage_key, f"Calling {tool_name} with: {arguments[:200]}")
         # Record the tool response
-        self._log_store.record_tool_response(self.name, tool_name, result[:500])
+        self._log_store.record_tool_response(self.storage_key, tool_name, result[:500])
+
+    def record_request(self, instructions: str) -> None:
+        """Record the current request under the tenant-scoped storage key."""
+        self._log_store.record_request(self.storage_key, instructions)

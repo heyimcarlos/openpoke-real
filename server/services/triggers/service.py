@@ -33,6 +33,10 @@ class TriggerService:
         self,
         *,
         agent_name: str,
+        display_agent_name: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        actor_id: Optional[str] = None,
+        composio_user_id: Optional[str] = None,
         payload: str,
         recurrence_rule: Optional[str] = None,
         start_time: Optional[str] = None,
@@ -52,6 +56,10 @@ class TriggerService:
         timestamp = to_storage_timestamp(now)
         record: Dict[str, Any] = {
             "agent_name": agent_name,
+            "display_agent_name": display_agent_name,
+            "tenant_id": tenant_id,
+            "actor_id": actor_id,
+            "composio_user_id": composio_user_id,
             "payload": payload,
             "start_time": to_storage_timestamp(start_dt_local),
             "next_trigger": to_storage_timestamp(next_fire) if next_fire else None,

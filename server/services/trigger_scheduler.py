@@ -6,9 +6,14 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Optional, Set
 
-from ..agents.execution_agent.batch_manager import ExecutionBatchManager
-from ..agents.execution_agent.runtime import ExecutionResult
 from ..logging_config import logger
+from .task_queue import (
+    ExecutorKind,
+    Principal,
+    SubmitTask,
+    TaskStatus,
+)
+from .task_queue.provider import get_shared_task_service
 from .triggers import TriggerRecord, get_trigger_service
 
 
@@ -32,6 +37,7 @@ class TriggerScheduler:
         self._task: Optional[asyncio.Task[None]] = None
         self._running = False
         self._in_flight: Set[int] = set()
+        self._execution_tasks: Set[asyncio.Task[None]] = set()
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
@@ -54,6 +60,14 @@ class TriggerScheduler:
                     pass
                 self._task = None
                 logger.info("Trigger scheduler stopped")
+            execution_tasks = list(self._execution_tasks)
+            for task in execution_tasks:
+                task.cancel()
+            if execution_tasks:
+                await asyncio.gather(
+                    *execution_tasks,
+                    return_exceptions=True,
+                )
 
     async def _run(self) -> None:
         try:
@@ -75,7 +89,12 @@ class TriggerScheduler:
             if trigger.id in self._in_flight:
                 continue
             self._in_flight.add(trigger.id)
-            asyncio.create_task(self._execute_trigger(trigger), name=f"trigger-{trigger.id}")
+            task = asyncio.create_task(
+                self._execute_trigger(trigger),
+                name=f"trigger-{trigger.id}",
+            )
+            self._execution_tasks.add(task)
+            task.add_done_callback(self._execution_tasks.discard)
 
     async def _execute_trigger(self, trigger: TriggerRecord) -> None:
         try:
@@ -89,20 +108,69 @@ class TriggerScheduler:
                     "scheduled_for": trigger.next_trigger,
                 },
             )
-            execution_manager = ExecutionBatchManager()
-            result = await execution_manager.execute_agent(
-                trigger.agent_name,
-                instructions,
+            scheduled_for = trigger.next_trigger or _isoformat(fired_at)
+            task_service = await get_shared_task_service()
+            principal = Principal(
+                actor_id=trigger.actor_id or "trigger-scheduler",
+                tenant_id=trigger.tenant_id or "local",
+                scopes=frozenset({"tasks:create", "tasks:read"}),
+                composio_user_id=trigger.composio_user_id,
             )
-            if result.success:
-                self._handle_success(trigger, fired_at)
-            else:
-                error_text = result.error or result.response
-                self._handle_failure(trigger, fired_at, error_text)
-        except Exception as exc:  # pragma: no cover - defensive
-            self._handle_failure(trigger, _utc_now(), str(exc))
+            accepted = await task_service.submit(
+                principal,
+                SubmitTask(
+                    idempotency_key=f"trigger:{trigger.id}:{scheduled_for}",
+                    origin_turn_id=f"trigger:{trigger.id}:{scheduled_for}",
+                    agent_name=(
+                        trigger.display_agent_name
+                        or trigger.agent_name
+                    ),
+                    executor_kind=ExecutorKind.AGENT,
+                    input={
+                        "instructions": instructions,
+                        "composio_user_id": trigger.composio_user_id,
+                        "execution_storage_key": (
+                            trigger.agent_name
+                            if trigger.agent_name.startswith("agent-")
+                            else None
+                        ),
+                    },
+                ),
+            )
+        except Exception:  # pragma: no cover - defensive
+            self._handle_failure(
+                trigger,
+                _utc_now(),
+                "trigger task submission failed",
+            )
             logger.exception(
-                "Trigger execution failed unexpectedly",
+                "Trigger task submission failed",
+                extra={"trigger_id": trigger.id, "agent": trigger.agent_name},
+            )
+            self._in_flight.discard(trigger.id)
+            return
+
+        try:
+            while True:
+                record = await task_service.get(principal, accepted.task_id)
+                if record is None:
+                    raise RuntimeError("accepted trigger task disappeared")
+                if record.status is TaskStatus.COMPLETED:
+                    self._handle_success(trigger, fired_at)
+                    break
+                if record.status in {
+                    TaskStatus.DEAD_LETTERED,
+                    TaskStatus.CANCELLED,
+                }:
+                    failure = record.failure.value if record.failure else "cancelled"
+                    self._handle_failure(trigger, fired_at, failure)
+                    break
+                await asyncio.sleep(self._poll_interval)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - defensive
+            logger.exception(
+                "Trigger task observation failed",
                 extra={"trigger_id": trigger.id, "agent": trigger.agent_name},
             )
         finally:

@@ -5,8 +5,10 @@ from fastapi import status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from ...agents.interaction_agent.runtime import InteractionAgentRuntime
+from ...agents.interaction_agent.tools import InteractionToolContext
 from ...logging_config import logger
 from ...models import ChatMessage, ChatRequest
+from ..task_queue import Principal, TaskService
 from ...utils import error_response
 
 
@@ -19,7 +21,12 @@ def _extract_latest_user_message(payload: ChatRequest) -> Optional[ChatMessage]:
 
 
 # Process incoming chat requests by routing them to the interaction agent runtime
-async def handle_chat_request(payload: ChatRequest) -> Union[PlainTextResponse, JSONResponse]:
+async def handle_chat_request(
+    payload: ChatRequest,
+    *,
+    principal: Principal,
+    task_service: TaskService,
+) -> Union[PlainTextResponse, JSONResponse]:
     """Handle a chat request using the InteractionAgentRuntime."""
 
     # Extract user message
@@ -32,7 +39,13 @@ async def handle_chat_request(payload: ChatRequest) -> Union[PlainTextResponse, 
     logger.info("chat request", extra={"message_length": len(user_content)})
 
     try:
-        runtime = InteractionAgentRuntime()
+        runtime = InteractionAgentRuntime(
+            tool_context=InteractionToolContext(
+                principal=principal,
+                origin_turn_id=payload.turn_id,
+                task_service=task_service,
+            )
+        )
     except ValueError as ve:
         # Missing API key error
         logger.error("configuration error", extra={"error": str(ve)})

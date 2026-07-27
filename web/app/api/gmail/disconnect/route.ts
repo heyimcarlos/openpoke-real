@@ -6,7 +6,7 @@ export async function POST(req: Request) {
     body = await req.json();
   } catch {}
 
-  const userId = body?.userId || '';
+  const userId = process.env.OPENPOKE_LOCAL_COMPOSIO_USER_ID || '';
   const connectionId = body?.connectionId || '';
   const connectionRequestId = body?.connectionRequestId || '';
 

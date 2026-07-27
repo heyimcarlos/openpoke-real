@@ -127,10 +127,12 @@ export default function Page() {
       });
 
       try {
+        const turnId = crypto.randomUUID();
         const res = await fetch('/api/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            turn_id: turnId,
             messages: [{ role: 'user', content: trimmed }],
           }),
         });
