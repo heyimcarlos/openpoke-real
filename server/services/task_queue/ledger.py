@@ -154,6 +154,8 @@ class PostgresTaskLedger:
         self,
         worker_id: str,
         lease_duration: timedelta,
+        *,
+        executor_kind: ExecutorKind | None = None,
     ) -> TaskLease | None:
         """Claim one task, serializing admission to keep capacity limits exact."""
 
@@ -196,6 +198,13 @@ class PostgresTaskLedger:
                         WHERE global.active_count < $1
                           AND COALESCE(tenant.active_count, 0) < $2
                           AND (
+                              $4::text IS NULL
+                              OR COALESCE(
+                                  to_jsonb(task)->>'executor_kind',
+                                  'agent'
+                              ) = $4
+                          )
+                          AND (
                               (
                                   task.status = 'queued'
                                   AND task.attempt_count < $3
@@ -215,6 +224,7 @@ class PostgresTaskLedger:
                         self._global_active_limit,
                         self._tenant_active_limit,
                         self._max_attempts,
+                        executor_kind.value if executor_kind else None,
                     )
                     if candidate is None:
                         row = None
@@ -389,7 +399,83 @@ class PostgresTaskLedger:
                 )
                 if row is None:
                     raise RuntimeError("failed task disappeared")
+                if row["status"] == "queued":
+                    from .outbox import append_task_wake
+
+                    await append_task_wake(
+                        connection,
+                        task_id=row["task_id"],
+                        executor_kind=row.get(
+                            "executor_kind",
+                            ExecutorKind.AGENT.value,
+                        ),
+                        source_transition="retry",
+                        source_generation=row["attempt_count"],
+                    )
         return task_from_row(row)
+
+    async def recover_expired(self, *, limit: int = 100) -> int:
+        """Requeue recoverable expired leases and append fenced wakes."""
+
+        if limit < 1:
+            raise ValueError("recovery limit must be positive")
+        recovered = 0
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                candidates = await connection.fetch(
+                    """
+                    SELECT task_id
+                    FROM execution_tasks
+                    WHERE status = 'running'
+                      AND lease_expires_at <= clock_timestamp()
+                      AND attempt_count < $1
+                    ORDER BY lease_expires_at, task_id
+                    LIMIT $2
+                    """,
+                    self._max_attempts,
+                    limit,
+                )
+                from ..workflows import record_workflow_task_failed
+                from .outbox import append_task_wake
+
+                for candidate in candidates:
+                    await _lock_workflow_instance_for_task(
+                        connection,
+                        candidate["task_id"],
+                    )
+                    row = await connection.fetchrow(
+                        """
+                        UPDATE execution_tasks
+                        SET status = 'queued',
+                            failure_code = 'lease_expired',
+                            lease_owner = NULL,
+                            lease_expires_at = NULL
+                        WHERE task_id = $1
+                          AND status = 'running'
+                          AND lease_expires_at <= clock_timestamp()
+                          AND attempt_count < $2
+                        RETURNING *
+                        """,
+                        candidate["task_id"],
+                        self._max_attempts,
+                    )
+                    if row is None:
+                        continue
+                    await record_workflow_task_failed(connection, row)
+                    current = await connection.fetchrow(
+                        "SELECT * FROM execution_tasks WHERE task_id = $1",
+                        row["task_id"],
+                    )
+                    if current is not None and current["status"] == "queued":
+                        await append_task_wake(
+                            connection,
+                            task_id=row["task_id"],
+                            executor_kind=row["executor_kind"],
+                            source_transition="lease_expired",
+                            source_generation=row["lease_generation"],
+                        )
+                    recovered += 1
+        return recovered
 
 
 async def _lock_workflow_instance_for_task(

@@ -776,9 +776,13 @@ async def _release_wait_routes(
 ) -> list[asyncpg.Record]:
     candidates = await connection.fetch(
         """
-        SELECT step.step_id, step.execution_task_id
+        SELECT step.step_id,
+               step.execution_task_id,
+               task.executor_kind
         FROM workflow_wait_routes AS route
         JOIN workflow_steps AS step ON step.step_id = route.step_id
+        JOIN execution_tasks AS task
+          ON task.task_id = step.execution_task_id
         WHERE route.wait_id = $1
           AND step.status = 'blocked'
           AND NOT EXISTS (
@@ -824,6 +828,14 @@ async def _release_wait_routes(
         )
         if updated_step != "UPDATE 1" or updated_task != "UPDATE 1":
             raise RuntimeError("Wait route could not release Workflow Step")
+        from ..task_queue.outbox import append_task_wake
+
+        await append_task_wake(
+            connection,
+            task_id=candidate["execution_task_id"],
+            executor_kind=candidate["executor_kind"],
+            source_transition="signal_released",
+        )
     return list(candidates)
 
 

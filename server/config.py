@@ -62,6 +62,7 @@ class Settings(BaseModel):
     composio_gmail_auth_config_id: Optional[str] = Field(default=os.getenv("COMPOSIO_GMAIL_AUTH_CONFIG_ID"))
     composio_api_key: Optional[str] = Field(default=os.getenv("COMPOSIO_API_KEY"))
     database_url: Optional[str] = Field(default=os.getenv("OPENPOKE_DATABASE_URL"))
+    rabbitmq_url: Optional[str] = Field(default=os.getenv("OPENPOKE_RABBITMQ_URL"))
     jwt_signing_key: Optional[str] = Field(
         default=os.getenv("OPENPOKE_JWT_SIGNING_KEY")
     )

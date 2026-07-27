@@ -158,6 +158,15 @@ async def test_fan_in_releases_only_after_every_predecessor_succeeds(
 
     assert released is not None
     assert released.status is TaskStatus.QUEUED
+    assert await postgres_pool.fetchval(
+        """
+        SELECT count(*)
+        FROM task_wake_outbox
+        WHERE task_id = $1
+          AND source_transition = 'dependency_released'
+        """,
+        blocked.task_id,
+    ) == 1
     final_lease = await restarted_ledger.claim(
         "worker-3",
         timedelta(seconds=30),
@@ -261,6 +270,9 @@ async def test_start_rolls_back_when_full_dag_exceeds_tenant_budget(
         "SELECT count(*) FROM workflow_instances"
     ) == 0
     assert await postgres_pool.fetchval("SELECT count(*) FROM execution_tasks") == 0
+    assert await postgres_pool.fetchval(
+        "SELECT count(*) FROM task_wake_outbox"
+    ) == 0
 
 
 @pytest.mark.asyncio

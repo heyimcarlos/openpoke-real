@@ -11,6 +11,7 @@ class DatabaseRole(str, Enum):
     API = "api"
     ORCHESTRATOR = "orchestrator"
     WORKER = "worker"
+    RELAY = "relay"
     MIGRATOR = "migrator"
 
 
@@ -18,6 +19,7 @@ _MAX_POOL_SIZE = {
     DatabaseRole.API: 5,
     DatabaseRole.ORCHESTRATOR: 4,
     DatabaseRole.WORKER: 4,
+    DatabaseRole.RELAY: 2,
     DatabaseRole.MIGRATOR: 1,
 }
 

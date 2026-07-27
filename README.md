@@ -79,6 +79,10 @@ OpenPoke is a simplified, open-source take on [Interaction Company’s](https://
    ```bash
    uv run --locked python -m server.orchestrator_worker
    ```
+   When `OPENPOKE_RABBITMQ_URL` is configured, also run
+   `uv run --locked python -m server.outbox_relay`. RabbitMQ only wakes workers;
+   PostgreSQL still owns task state and leases. See
+   [RabbitMQ worker wakes](docs/operations/rabbitmq-wakes.md).
 12. **Start the Next.js app (new terminal):**
    ```bash
    npm run dev --prefix web
