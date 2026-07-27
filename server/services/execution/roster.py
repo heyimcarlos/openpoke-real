@@ -61,10 +61,11 @@ class AgentRoster:
                 break
 
     def add_agent(self, agent_name: str) -> None:
-        """Add an agent to the roster if not already present."""
-        if agent_name not in self._agents:
-            self._agents.append(agent_name)
-            self.save()
+        """Touch a context name, keeping most recently used at the end."""
+        if agent_name in self._agents:
+            self._agents.remove(agent_name)
+        self._agents.append(agent_name)
+        self.save()
 
     def get_agents(self) -> list[str]:
         """Get list of all agent names."""

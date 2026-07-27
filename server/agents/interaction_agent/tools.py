@@ -44,6 +44,7 @@ TOOL_SCHEMAS = [
             "name": "delegate_execution",
             "description": (
                 "Durably delegate one complete objective to an execution agent. "
+                "An interaction turn may delegate up to two independent objectives. "
                 "The name identifies a reusable logical context from the visible "
                 "roster, not a resident process or immediate compute allocation."
             ),
@@ -165,8 +166,7 @@ async def delegate_execution(
     existing_agents = set(roster.get_agents())
     is_new = agent_name not in existing_agents
 
-    if is_new:
-        roster.add_agent(agent_name)
+    roster.add_agent(agent_name)
 
     action = "Created" if is_new else "Reused"
     logger.info(f"{action} execution context: {agent_name}")
