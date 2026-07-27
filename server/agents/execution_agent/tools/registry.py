@@ -20,13 +20,28 @@ def get_tool_schemas() -> List[Dict[str, Any]]:
 
 
 # Return Python callables for executing tools by name
-def get_tool_registry(agent_name: str) -> Dict[str, Callable[..., Any]]:
+def get_tool_registry(
+    agent_name: str,
+    composio_user_id: str | None = None,
+    *,
+    display_agent_name: str | None = None,
+    tenant_id: str = "local",
+    actor_id: str = "local-user",
+) -> Dict[str, Callable[..., Any]]:
     """Return Python callables for executing tools by name."""
 
     registry: Dict[str, Callable[..., Any]] = {}
-    registry.update(gmail.build_registry(agent_name))
-    registry.update(get_task_registry(agent_name))
-    registry.update(triggers.build_registry(agent_name))
+    registry.update(gmail.build_registry(agent_name, composio_user_id))
+    registry.update(get_task_registry(agent_name, composio_user_id))
+    registry.update(
+        triggers.build_registry(
+            agent_name,
+            display_agent_name=display_agent_name or agent_name,
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            composio_user_id=composio_user_id,
+        )
+    )
     return registry
 
 

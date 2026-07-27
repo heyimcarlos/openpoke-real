@@ -38,6 +38,10 @@ class TriggerStore:
         CREATE TABLE IF NOT EXISTS triggers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             agent_name TEXT NOT NULL,
+            display_agent_name TEXT,
+            tenant_id TEXT,
+            actor_id TEXT,
+            composio_user_id TEXT,
             payload TEXT NOT NULL,
             start_time TEXT,
             next_trigger TEXT,
@@ -56,6 +60,18 @@ class TriggerStore:
         with self._lock, self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute(schema_sql)
+            existing_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(triggers)").fetchall()
+            }
+            for name in (
+                "display_agent_name",
+                "tenant_id",
+                "actor_id",
+                "composio_user_id",
+            ):
+                if name not in existing_columns:
+                    conn.execute(f"ALTER TABLE triggers ADD COLUMN {name} TEXT")
             conn.execute(index_sql)
 
     def insert(self, payload: Dict[str, Any]) -> int:

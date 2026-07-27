@@ -1,3 +1,5 @@
+import { rejectInProduction } from '@/lib/localDevelopmentProxy';
+
 export const runtime = 'nodejs';
 
 type UIMsgPart = { type: string; text?: string };
@@ -20,6 +22,11 @@ function uiToOpenAIContent(messages: UIMessage[]): { role: string; content: stri
 }
 
 export async function POST(req: Request) {
+  const productionRejection = rejectInProduction();
+  if (productionRejection) {
+    return productionRejection;
+  }
+
   let body: any;
   try {
     body = await req.json();
@@ -28,25 +35,37 @@ export async function POST(req: Request) {
     return new Response('Invalid JSON', { status: 400 });
   }
 
-  const { messages } = body || {};
+  const { messages, turn_id: turnId } = body || {};
   if (!Array.isArray(messages) || messages.length === 0) {
     return new Response('Missing messages', { status: 400 });
+  }
+  if (typeof turnId !== 'string' || turnId.length === 0) {
+    return new Response('Missing turn id', { status: 400 });
   }
 
   const serverBase = process.env.PY_SERVER_URL || 'http://localhost:8001';
   const serverPath = process.env.PY_CHAT_PATH || '/api/v1/chat/send';
+  const bearerToken = process.env.OPENPOKE_WEB_BEARER_TOKEN;
+  if (!bearerToken) {
+    return new Response('Chat authentication is not configured', { status: 503 });
+  }
   const url = `${serverBase.replace(/\/$/, '')}${serverPath}`;
 
   const payload = {
     system: '',
     messages: uiToOpenAIContent(messages),
     stream: false,
+    turn_id: turnId,
   };
 
   try {
     const upstream = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'text/plain, */*' },
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/plain, */*',
+        Authorization: `Bearer ${bearerToken}`,
+      },
       body: JSON.stringify(payload),
     });
     const text = await upstream.text();

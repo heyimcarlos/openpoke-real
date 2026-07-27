@@ -8,6 +8,7 @@ from .ledger import (
     StaleLease,
 )
 from .models import (
+    ExecutorKind,
     FailureCode,
     Principal,
     SubmitTask,
@@ -20,6 +21,7 @@ from .service import MissingScope, TaskService
 
 __all__ = [
     "AdmissionRejected",
+    "ExecutorKind",
     "FailureCode",
     "IdempotencyConflict",
     "InvalidToken",

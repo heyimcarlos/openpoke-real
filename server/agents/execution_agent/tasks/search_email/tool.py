@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from server.config import get_settings
@@ -13,7 +14,6 @@ from server.services.gmail import (
     EmailTextCleaner,
     ProcessedEmail,
     execute_gmail_tool,
-    get_active_gmail_user_id,
     parse_gmail_fetch_response,
 )
 from .gmail_internal import GMAIL_FETCH_EMAILS_SCHEMA
@@ -66,11 +66,6 @@ def _validate_search_query(search_query: str) -> Optional[str]:
     return None
 
 
-def _validate_gmail_connection() -> Optional[str]:
-    """Validate Gmail connection and return user ID or None."""
-    return get_active_gmail_user_id()
-
-
 def _validate_openrouter_config() -> Tuple[Optional[str], Optional[str]]:
     """Validate OpenRouter configuration and return (api_key, model) or (None, error)."""
     settings = get_settings()
@@ -81,18 +76,31 @@ def _validate_openrouter_config() -> Tuple[Optional[str], Optional[str]]:
 
 
 # Return task tool callables
-def build_registry(agent_name: str) -> Dict[str, Callable[..., Any]]:  # noqa: ARG001
+def build_registry(
+    agent_name: str,
+    composio_user_id: Optional[str] = None,
+) -> Dict[str, Callable[..., Any]]:  # noqa: ARG001
     """Return task tool callables."""
 
     return {
-        TASK_TOOL_NAME: task_email_search,
+        TASK_TOOL_NAME: partial(
+            task_email_search,
+            composio_user_id=composio_user_id,
+        ),
     }
 
 
 # Run an agentic Gmail search for the provided query
-async def task_email_search(search_query: str) -> Any:
+async def task_email_search(
+    search_query: str,
+    *,
+    composio_user_id: Optional[str],
+) -> Any:
     """Run an agentic Gmail search for the provided query."""
-    logger.info(f"[EMAIL_SEARCH] Starting search for: '{search_query}'")
+    logger.info(
+        "[EMAIL_SEARCH] Starting search",
+        extra={"query_length": len(search_query or "")},
+    )
     
     # Validate inputs
     cleaned_query = (search_query or "").strip()
@@ -100,7 +108,6 @@ async def task_email_search(search_query: str) -> Any:
         logger.error(f"[EMAIL_SEARCH] Invalid query: {error}")
         return {"error": error}
     
-    composio_user_id = _validate_gmail_connection()
     if not composio_user_id:
         logger.error(f"[EMAIL_SEARCH] Gmail not connected")
         return {"error": ERROR_GMAIL_NOT_CONNECTED}
@@ -120,8 +127,11 @@ async def task_email_search(search_query: str) -> Any:
         logger.info(f"[EMAIL_SEARCH] Found {len(result) if isinstance(result, list) else 0} emails")
         return result
     except Exception as exc:  # pragma: no cover - defensive
-        logger.exception(f"[EMAIL_SEARCH] Search failed: {exc}")
-        return {"error": f"Email search failed: {exc}"}
+        logger.error(
+            "[EMAIL_SEARCH] Search failed",
+            extra={"error_type": type(exc).__name__},
+        )
+        return {"error": "Email search failed"}
 
 
 # Execute the main email search orchestration loop
@@ -249,7 +259,10 @@ async def _execute_tool_calls(
         elif name == SEARCH_TOOL_NAME:
             # Handle Gmail search tool
             search_query = arguments.get("query", "<unknown>")
-            logger.info(f"[SEARCH_QUERY] LLM generated query: '{search_query}'")
+            logger.info(
+                "[SEARCH_QUERY] LLM generated query",
+                extra={"query_length": len(search_query)},
+            )
             
             result_model = await _perform_search(
                 arguments=arguments,
@@ -261,9 +274,15 @@ async def _execute_tool_calls(
             
             if result_model.status == "success":
                 count = result_model.result_count or 0
-                logger.info(f"[SEARCH_RESULT] Query '{search_query}' → {count} emails found")
+                logger.info(
+                    "[SEARCH_RESULT] Search completed",
+                    extra={"result_count": count},
+                )
             else:
-                logger.warning(f"[SEARCH_RESULT] Query '{search_query}' → FAILED: {result_model.error}")
+                logger.warning(
+                    "[SEARCH_RESULT] Search failed",
+                    extra={"error": result_model.error},
+                )
             
             responses.append(_create_success_response(call_id, response_data))
 
@@ -308,7 +327,7 @@ async def _perform_search(
 
     _LOG_STORE.record_action(
         TASK_TOOL_NAME,
-        description=f"{TASK_TOOL_NAME} search | query={query} | max_results={max_results}",
+        description=f"{TASK_TOOL_NAME} search | max_results={max_results}",
     )
 
     try:
@@ -318,11 +337,14 @@ async def _perform_search(
             arguments=composio_arguments,
         )
     except Exception as exc:
-        logger.error(f"[EMAIL_SEARCH] Gmail API failed for '{query}': {exc}")
+        logger.error(
+            "[EMAIL_SEARCH] Gmail API failed",
+            extra={"error_type": type(exc).__name__},
+        )
         return EmailSearchToolResult(
             status="error",
             query=query,
-            error=str(exc),
+            error="Gmail provider request failed",
         )
 
     processed_emails, next_page_token = parse_gmail_fetch_response(

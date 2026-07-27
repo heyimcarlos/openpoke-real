@@ -1,14 +1,20 @@
 """Tool definitions for interaction agent."""
 
-import asyncio
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from ...logging_config import logger
 from ...services.conversation import get_conversation_log
-from ...services.execution import get_agent_roster, get_execution_agent_logs
-from ..execution_agent.batch_manager import ExecutionBatchManager
+from ...services.execution import get_agent_roster
+from ...services.task_queue import (
+    AdmissionRejected,
+    ExecutorKind,
+    Principal,
+    SubmitTask,
+    TaskService,
+)
 
 
 @dataclass
@@ -19,6 +25,16 @@ class ToolResult:
     payload: Any = None
     user_message: Optional[str] = None
     recorded_reply: bool = False
+
+
+@dataclass(frozen=True)
+class InteractionToolContext:
+    """Trusted execution context that is never supplied by the model."""
+
+    principal: Principal
+    origin_turn_id: str
+    task_service: TaskService
+
 
 # Tool schemas for OpenRouter
 TOOL_SCHEMAS = [
@@ -105,12 +121,41 @@ TOOL_SCHEMAS = [
     },
 ]
 
-_EXECUTION_BATCH_MANAGER = ExecutionBatchManager()
+async def send_message_to_agent(
+    agent_name: str,
+    instructions: str,
+    *,
+    context: InteractionToolContext,
+) -> ToolResult:
+    """Durably accept execution work before reporting it as submitted."""
+    semantic_delegation = json.dumps(
+        {
+            "agent_name": agent_name,
+            "instructions": instructions,
+            "origin_turn_id": context.origin_turn_id,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    idempotency_key = (
+        "delegation:"
+        + hashlib.sha256(semantic_delegation.encode("utf-8")).hexdigest()
+    )
+    accepted = await context.task_service.submit(
+        context.principal,
+        SubmitTask(
+            idempotency_key=idempotency_key,
+            origin_turn_id=context.origin_turn_id,
+            agent_name=agent_name,
+            executor_kind=ExecutorKind.AGENT,
+            input={
+                "instructions": instructions,
+                "composio_user_id": context.principal.composio_user_id,
+            },
+        ),
+    )
 
-
-# Create or reuse execution agent and dispatch instructions asynchronously
-def send_message_to_agent(agent_name: str, instructions: str) -> ToolResult:
-    """Send instructions to an execution agent."""
     roster = get_agent_roster()
     roster.load()
     existing_agents = set(roster.get_agents())
@@ -119,31 +164,14 @@ def send_message_to_agent(agent_name: str, instructions: str) -> ToolResult:
     if is_new:
         roster.add_agent(agent_name)
 
-    get_execution_agent_logs().record_request(agent_name, instructions)
-
     action = "Created" if is_new else "Reused"
     logger.info(f"{action} agent: {agent_name}")
-
-    async def _execute_async() -> None:
-        try:
-            result = await _EXECUTION_BATCH_MANAGER.execute_agent(agent_name, instructions)
-            status = "SUCCESS" if result.success else "FAILED"
-            logger.info(f"Agent '{agent_name}' completed: {status}")
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.error(f"Agent '{agent_name}' failed: {str(exc)}")
-
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        logger.error("No running event loop available for async execution")
-        return ToolResult(success=False, payload={"error": "No event loop available"})
-
-    loop.create_task(_execute_async())
 
     return ToolResult(
         success=True,
         payload={
             "status": "submitted",
+            "task_id": accepted.task_id,
             "agent_name": agent_name,
             "new_agent_created": is_new,
         },
@@ -215,7 +243,12 @@ def get_tool_schemas():
 
 
 # Route tool calls to appropriate handlers with argument validation and error handling
-def handle_tool_call(name: str, arguments: Any) -> ToolResult:
+async def handle_tool_call(
+    name: str,
+    arguments: Any,
+    *,
+    context: InteractionToolContext | None = None,
+) -> ToolResult:
     """Handle tool calls from interaction agent."""
     try:
         if isinstance(arguments, str):
@@ -226,7 +259,21 @@ def handle_tool_call(name: str, arguments: Any) -> ToolResult:
             return ToolResult(success=False, payload={"error": "Invalid arguments format"})
 
         if name == "send_message_to_agent":
-            return send_message_to_agent(**args)
+            if context is None:
+                return ToolResult(
+                    success=False,
+                    payload={"error": "Execution context is unavailable"},
+                )
+            try:
+                return await send_message_to_agent(**args, context=context)
+            except AdmissionRejected as exc:
+                return ToolResult(
+                    success=False,
+                    payload={
+                        "error": "Execution backlog is full",
+                        "retry_after_seconds": exc.retry_after_seconds,
+                    },
+                )
         if name == "send_message_to_user":
             return send_message_to_user(**args)
         if name == "send_draft":

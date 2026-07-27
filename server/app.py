@@ -11,6 +11,7 @@ from .config import get_settings
 from .logging_config import configure_logging, logger
 from .routes import api_router
 from .services import get_important_email_watcher, get_trigger_scheduler
+from .services.task_queue.provider import close_shared_task_service
 
 
 # Register global exception handlers for consistent error responses across the API
@@ -32,7 +33,11 @@ def register_exception_handlers(app: FastAPI) -> None:
         detail = exc.detail
         if not isinstance(detail, str):
             detail = json.dumps(detail)
-        return JSONResponse({"ok": False, "error": detail}, status_code=exc.status_code)
+        return JSONResponse(
+            {"ok": False, "error": detail},
+            status_code=exc.status_code,
+            headers=exc.headers,
+        )
 
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception):
@@ -81,6 +86,7 @@ async def _stop_trigger_scheduler() -> None:
     await scheduler.stop()
     watcher = get_important_email_watcher()
     await watcher.stop()
+    await close_shared_task_service()
 
 
 __all__ = ["app"]

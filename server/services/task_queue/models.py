@@ -22,11 +22,19 @@ class TaskStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class ExecutorKind(str, Enum):
+    AGENT = "agent"
+    SYNTHETIC = "synthetic"
+
+
 class FailureCode(str, Enum):
     SYNTHETIC_RETRYABLE = "synthetic_retryable"
     SYNTHETIC_NON_RETRYABLE = "synthetic_non_retryable"
     LEASE_EXPIRED = "lease_expired"
     ATTEMPTS_EXHAUSTED = "attempts_exhausted"
+    EXECUTION_TIMEOUT = "execution_timeout"
+    AGENT_NON_RETRYABLE = "agent_non_retryable"
+    UNKNOWN_EXECUTOR = "unknown_executor"
 
 
 class TaskFailure(BaseModel):
@@ -76,6 +84,7 @@ class Principal:
     actor_id: str
     tenant_id: str
     scopes: frozenset[str]
+    composio_user_id: str | None = None
 
 
 class SubmitTask(BaseModel):
@@ -88,8 +97,9 @@ class SubmitTask(BaseModel):
     agent_name: str = Field(
         min_length=1,
         max_length=64,
-        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+        pattern=r"^[^\x00-\x1f\x7f]+$",
     )
+    executor_kind: ExecutorKind = ExecutorKind.AGENT
     input: dict[str, JsonValue]
 
     @model_validator(mode="after")
@@ -110,6 +120,7 @@ class TaskRecord:
     idempotency_key: str
     origin_turn_id: str
     agent_name: str
+    executor_kind: ExecutorKind
     input: dict[str, JsonValue]
     status: TaskStatus
     result: dict[str, JsonValue] | None
@@ -122,7 +133,10 @@ class TaskRecord:
 class TaskLease:
     task_id: UUID
     tenant_id: str
+    actor_id: str
+    origin_turn_id: str
     agent_name: str
+    executor_kind: ExecutorKind
     input: dict[str, JsonValue]
     attempt_count: int
     lease_generation: int

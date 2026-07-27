@@ -12,6 +12,7 @@ import asyncpg
 from pydantic import JsonValue
 
 from .models import (
+    ExecutorKind,
     FailureCode,
     Principal,
     SubmitTask,
@@ -111,6 +112,7 @@ class PostgresTaskLedger:
                         """,
                         migration_path.name,
                     )
+        await self._pool.expire_connections()
 
     async def submit(
         self,
@@ -159,29 +161,71 @@ class PostgresTaskLedger:
                 if outstanding_count >= self._tenant_outstanding_limit:
                     raise AdmissionRejected(self._admission_retry_after_seconds)
 
-                row = await connection.fetchrow(
+                has_executor_kind = await connection.fetchval(
                     """
-                    INSERT INTO execution_tasks (
-                        tenant_id,
-                        actor_id,
-                        idempotency_key,
-                        request_fingerprint,
-                        origin_turn_id,
-                        agent_name,
-                        input
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_attribute
+                        WHERE attrelid = 'execution_tasks'::regclass
+                          AND attname = 'executor_kind'
+                          AND NOT attisdropped
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-                    ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
-                    RETURNING *
-                    """,
-                    principal.tenant_id,
-                    principal.actor_id,
-                    command.idempotency_key,
-                    fingerprint,
-                    command.origin_turn_id,
-                    command.agent_name,
-                    serialized_input,
+                    """
                 )
+                if has_executor_kind:
+                    row = await connection.fetchrow(
+                        """
+                        INSERT INTO execution_tasks (
+                            tenant_id,
+                            actor_id,
+                            idempotency_key,
+                            request_fingerprint,
+                            origin_turn_id,
+                            agent_name,
+                            executor_kind,
+                            input
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+                        ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+                        RETURNING *
+                        """,
+                        principal.tenant_id,
+                        principal.actor_id,
+                        command.idempotency_key,
+                        fingerprint,
+                        command.origin_turn_id,
+                        command.agent_name,
+                        command.executor_kind.value,
+                        serialized_input,
+                    )
+                else:
+                    if command.executor_kind is not ExecutorKind.AGENT:
+                        raise RuntimeError(
+                            "executor policy migration has not been applied"
+                        )
+                    row = await connection.fetchrow(
+                        """
+                        INSERT INTO execution_tasks (
+                            tenant_id,
+                            actor_id,
+                            idempotency_key,
+                            request_fingerprint,
+                            origin_turn_id,
+                            agent_name,
+                            input
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                        ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+                        RETURNING *
+                        """,
+                        principal.tenant_id,
+                        principal.actor_id,
+                        command.idempotency_key,
+                        fingerprint,
+                        command.origin_turn_id,
+                        command.agent_name,
+                        serialized_input,
+                    )
                 if row is None:
                     row = await connection.fetchrow(
                         """
@@ -411,6 +455,8 @@ def _request_fingerprint(
         "input_json": serialized_input,
         "origin_turn_id": command.origin_turn_id,
     }
+    if command.executor_kind is not ExecutorKind.AGENT:
+        semantic_request["executor_kind"] = command.executor_kind.value
     canonical = canonical_json(semantic_request)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -423,6 +469,7 @@ def _task_from_row(row: asyncpg.Record) -> TaskRecord:
         idempotency_key=row["idempotency_key"],
         origin_turn_id=row["origin_turn_id"],
         agent_name=row["agent_name"],
+        executor_kind=ExecutorKind(row.get("executor_kind", ExecutorKind.AGENT.value)),
         input=json.loads(row["input"]),
         status=TaskStatus(row["status"]),
         result=json.loads(row["result"]) if row["result"] is not None else None,
@@ -440,7 +487,12 @@ def _lease_from_row(row: asyncpg.Record) -> TaskLease:
     return TaskLease(
         task_id=row["task_id"],
         tenant_id=row["tenant_id"],
+        actor_id=row["actor_id"],
+        origin_turn_id=row["origin_turn_id"],
         agent_name=row["agent_name"],
+        executor_kind=ExecutorKind(
+            row.get("executor_kind", ExecutorKind.AGENT.value)
+        ),
         input=json.loads(row["input"]),
         attempt_count=row["attempt_count"],
         lease_generation=row["lease_generation"],

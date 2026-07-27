@@ -61,6 +61,18 @@ class Settings(BaseModel):
     openrouter_api_key: Optional[str] = Field(default=os.getenv("OPENROUTER_API_KEY"))
     composio_gmail_auth_config_id: Optional[str] = Field(default=os.getenv("COMPOSIO_GMAIL_AUTH_CONFIG_ID"))
     composio_api_key: Optional[str] = Field(default=os.getenv("COMPOSIO_API_KEY"))
+    database_url: Optional[str] = Field(default=os.getenv("OPENPOKE_DATABASE_URL"))
+    jwt_signing_key: Optional[str] = Field(
+        default=os.getenv("OPENPOKE_JWT_SIGNING_KEY")
+    )
+    jwt_issuer: Optional[str] = Field(default=os.getenv("OPENPOKE_JWT_ISSUER"))
+    jwt_audience: Optional[str] = Field(default=os.getenv("OPENPOKE_JWT_AUDIENCE"))
+    allowed_chat_tenant_id: Optional[str] = Field(
+        default=os.getenv("OPENPOKE_CHAT_ALLOWED_TENANT_ID")
+    )
+    allowed_chat_actor_id: Optional[str] = Field(
+        default=os.getenv("OPENPOKE_CHAT_ALLOWED_ACTOR_ID")
+    )
 
     # HTTP behaviour
     cors_allow_origins_raw: str = Field(default=os.getenv("OPENPOKE_CORS_ALLOW_ORIGINS", "*"))

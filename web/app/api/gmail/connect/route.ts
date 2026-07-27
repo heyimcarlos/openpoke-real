@@ -1,12 +1,26 @@
+import { readJsonObject, rejectInProduction } from '@/lib/localDevelopmentProxy';
+
 export const runtime = 'nodejs';
 
 export async function POST(req: Request) {
-  let body: any = {};
-  try {
-    body = await req.json();
-  } catch {}
-  const userId = body?.userId || '';
-  const authConfigId = body?.authConfigId || '';
+  const productionRejection = rejectInProduction();
+  if (productionRejection) {
+    return productionRejection;
+  }
+
+  const body = await readJsonObject(req);
+  if (body instanceof Response) {
+    return body;
+  }
+
+  const userId = process.env.OPENPOKE_LOCAL_COMPOSIO_USER_ID || '';
+  if (!userId) {
+    return new Response(
+      JSON.stringify({ ok: false, error: 'Gmail identity is not configured' }),
+      { status: 503, headers: { 'Content-Type': 'application/json; charset=utf-8' } },
+    );
+  }
+  const authConfigId = typeof body.authConfigId === 'string' ? body.authConfigId : '';
 
   const serverBase = process.env.PY_SERVER_URL || 'http://localhost:8001';
   const url = `${serverBase.replace(/\/$/, '')}/api/v1/gmail/connect`;

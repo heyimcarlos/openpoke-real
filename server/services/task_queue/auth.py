@@ -25,6 +25,8 @@ class JwtPrincipalVerifier:
     ) -> None:
         if not signing_key or not issuer or not audience:
             raise ValueError("JWT signing key, issuer, and audience are required")
+        if len(signing_key.encode("utf-8")) < 32:
+            raise ValueError("JWT HS256 signing key must be at least 32 bytes")
         self._signing_key = signing_key
         self._issuer = issuer
         self._audience = audience
@@ -44,6 +46,10 @@ class JwtPrincipalVerifier:
             actor_id = _required_string_claim(claims, "sub")
             tenant_id = _required_string_claim(claims, "tenant_id")
             scopes = _scope_claim(claims.get("scope", ""))
+            composio_user_id = _optional_string_claim(
+                claims,
+                "composio_user_id",
+            )
         except (jwt.PyJWTError, TypeError, ValueError):
             raise InvalidToken("invalid bearer token") from None
 
@@ -51,6 +57,7 @@ class JwtPrincipalVerifier:
             actor_id=actor_id,
             tenant_id=tenant_id,
             scopes=scopes,
+            composio_user_id=composio_user_id,
         )
 
 
@@ -59,6 +66,18 @@ def _required_string_claim(claims: dict[str, Any], name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be a non-empty string")
     return value
+
+
+def _optional_string_claim(
+    claims: dict[str, Any],
+    name: str,
+) -> str | None:
+    value = claims.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"invalid claim: {name}")
+    return value.strip()
 
 
 def _scope_claim(value: Any) -> frozenset[str]:
