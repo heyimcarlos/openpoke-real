@@ -36,12 +36,14 @@ from .broker import (
     RabbitMQWakeBroker,
     RabbitMQWakePublisher,
 )
+from .execution import ExecutionFailure
 from .service import MissingScope, TaskService
 
 __all__ = [
     "AdmissionRejected",
     "BoundedTaskWorkerWakeHandler",
     "ExecutorKind",
+    "ExecutionFailure",
     "FailureCode",
     "IdempotencyConflict",
     "InvalidToken",

@@ -10,7 +10,12 @@ import os
 import socket
 from datetime import timedelta
 
-from .agents.execution_agent import AgentsSdkExecutor
+from .agents.execution_agent import (
+    AgentsSdkExecutor,
+    BoundedReasoningExecutor,
+    WorkflowAwareAgentExecutor,
+    create_openrouter_model,
+)
 from .config import get_settings
 from .database import DatabaseRole, create_role_pool
 from .services.task_queue import (
@@ -112,10 +117,23 @@ async def _run(
             ExecutorKind.SYNTHETIC: SyntheticExecutor(),
         }
         if executor_kind in {None, ExecutorKind.AGENT}:
-            configured_executors[ExecutorKind.AGENT] = AgentsSdkExecutor(
-                    api_key=settings.openrouter_api_key,
-                    model_name=settings.execution_agent_model,
-                )
+            configured_executors[ExecutorKind.AGENT] = WorkflowAwareAgentExecutor(
+                independent=AgentsSdkExecutor(
+                    model=create_openrouter_model(
+                        api_key=settings.openrouter_api_key,
+                        model_name=settings.execution_agent_model,
+                    )
+                ),
+                bounded_reasoning=BoundedReasoningExecutor(
+                    model=create_openrouter_model(
+                        api_key=settings.openrouter_api_key,
+                        model_name=settings.reasoning_agent_model,
+                    ),
+                    tracing_enabled=(
+                        settings.agent_sdk_tracing_enabled
+                    ),
+                ),
+            )
         executors = ExecutorRegistry(configured_executors)
         result_sink = (
             InteractionResultSink(task_service)

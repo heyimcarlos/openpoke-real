@@ -53,6 +53,12 @@ class Settings(BaseModel):
     # LLM model selection
     interaction_agent_model: str = Field(default="anthropic/claude-sonnet-4")
     execution_agent_model: str = Field(default="anthropic/claude-sonnet-4")
+    reasoning_agent_model: str = Field(
+        default=os.getenv(
+            "OPENPOKE_REASONING_AGENT_MODEL",
+            "openai/gpt-4.1-mini",
+        )
+    )
     execution_agent_search_model: str = Field(default="anthropic/claude-sonnet-4")
     summarizer_model: str = Field(default="anthropic/claude-sonnet-4")
     email_classifier_model: str = Field(default="anthropic/claude-sonnet-4")
@@ -63,6 +69,9 @@ class Settings(BaseModel):
     composio_api_key: Optional[str] = Field(default=os.getenv("COMPOSIO_API_KEY"))
     database_url: Optional[str] = Field(default=os.getenv("OPENPOKE_DATABASE_URL"))
     rabbitmq_url: Optional[str] = Field(default=os.getenv("OPENPOKE_RABBITMQ_URL"))
+    agent_sdk_tracing_enabled: bool = Field(
+        default=os.getenv("OPENPOKE_AGENT_SDK_TRACING_ENABLED", "0") == "1"
+    )
     jwt_signing_key: Optional[str] = Field(
         default=os.getenv("OPENPOKE_JWT_SIGNING_KEY")
     )
