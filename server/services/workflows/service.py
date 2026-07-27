@@ -10,8 +10,11 @@ from .models import (
     WorkflowDefinition,
     WorkflowDefinitionRecord,
     WorkflowInstanceRecord,
+    WorkflowSignalCommand,
+    WorkflowSignalResult,
     WorkflowStartCommand,
     WorkflowStartResult,
+    WorkflowWaitRecord,
 )
 from .store import PostgresWorkflowStore
 
@@ -61,6 +64,31 @@ class WorkflowService:
     ) -> WorkflowInstanceRecord | None:
         _require_scope(principal, "workflows:read")
         return await self._store.get(principal.tenant_id, instance_id)
+
+    async def get_wait(
+        self,
+        principal: Principal,
+        wait_id: UUID,
+    ) -> WorkflowWaitRecord | None:
+        _require_scope(principal, "workflows:read")
+        return await self._store.get_wait(principal.tenant_id, wait_id)
+
+    async def signal(
+        self,
+        principal: Principal,
+        command: WorkflowSignalCommand,
+    ) -> WorkflowSignalResult:
+        _require_scope(principal, "workflows:signal")
+        return await self._store.signal(principal, command)
+
+    async def signal_for_run(
+        self,
+        principal: Principal,
+        command: WorkflowSignalCommand,
+        lease: AgentRunLease,
+    ) -> WorkflowSignalResult:
+        _require_scope(principal, "workflows:signal")
+        return await self._store.signal(principal, command, lease)
 
 
 def _require_scope(principal: Principal, scope: str) -> None:

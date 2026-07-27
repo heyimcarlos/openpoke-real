@@ -78,6 +78,10 @@ async def advance_workflow_for_task(
         )
         return False
 
+    opened_waits = await _open_ready_waits(
+        connection,
+        step["instance_id"],
+    )
     released = await connection.fetch(
         """
         SELECT candidate.step_id, candidate.execution_task_id
@@ -91,6 +95,17 @@ async def advance_workflow_for_task(
                 ON prerequisite.step_id = dependency.prerequisite_step_id
               WHERE dependency.step_id = candidate.step_id
                 AND prerequisite.status <> 'completed'
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM workflow_wait_routes AS route
+              LEFT JOIN workflow_waits AS wait
+                ON wait.wait_id = route.wait_id
+              WHERE route.step_id = candidate.step_id
+                AND (
+                    wait.wait_id IS NULL
+                    OR wait.status <> 'satisfied'
+                )
           )
         ORDER BY candidate.created_at, candidate.step_id
         FOR UPDATE OF candidate
@@ -146,6 +161,9 @@ async def advance_workflow_for_task(
             "released_step_ids": [
                 str(candidate["step_id"]) for candidate in released
             ],
+            "opened_wait_ids": [
+                str(wait["wait_id"]) for wait in opened_waits
+            ],
             "workflow_completed": workflow_completed,
         },
     )
@@ -185,6 +203,14 @@ async def record_workflow_task_failed(
             UPDATE workflow_instances
             SET status = 'failed'
             WHERE instance_id = $1 AND status = 'active'
+            """,
+            step["instance_id"],
+        )
+        await connection.execute(
+            """
+            UPDATE workflow_waits
+            SET status = 'cancelled'
+            WHERE instance_id = $1 AND status = 'open'
             """,
             step["instance_id"],
         )
@@ -228,6 +254,38 @@ async def record_workflow_task_failed(
                 str(item["task_id"]) for item in cancelled
             ],
         },
+    )
+
+
+async def _open_ready_waits(
+    connection: asyncpg.Connection,
+    instance_id,
+) -> list[asyncpg.Record]:
+    return list(
+        await connection.fetch(
+            """
+            INSERT INTO workflow_waits (wait_id, instance_id)
+            SELECT blueprint.wait_id, blueprint.instance_id
+            FROM workflow_wait_blueprints AS blueprint
+            WHERE blueprint.instance_id = $1
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM workflow_waits AS existing
+                  WHERE existing.wait_id = blueprint.wait_id
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM workflow_wait_prerequisites AS prerequisite
+                  JOIN workflow_steps AS step
+                    ON step.step_id = prerequisite.prerequisite_step_id
+                  WHERE prerequisite.wait_id = blueprint.wait_id
+                    AND step.status <> 'completed'
+              )
+            ON CONFLICT (wait_id) DO NOTHING
+            RETURNING *
+            """,
+            instance_id,
+        )
     )
 
 

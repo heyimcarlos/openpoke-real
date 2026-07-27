@@ -193,20 +193,20 @@ class InteractionAgentRuntime:
                 summary.tool_names.append(tool_call.name)
 
                 if (
-                    tool_call.name in {"delegate_execution", "start_workflow"}
+                    tool_call.name
+                    in {
+                        "delegate_execution",
+                        "start_workflow",
+                        "signal_workflow_wait",
+                    }
                     and execution_submissions_attempted >= 2
                 ):
                     result = ToolResult(
                         success=False,
                         payload={
                             "error": (
-                                "At most two execution delegations are allowed per "
-                                "interaction turn"
-                                if tool_call.name == "delegate_execution"
-                                else (
-                                    "At most two execution submissions are allowed "
-                                    "per interaction turn"
-                                )
+                                "At most two execution submissions are allowed "
+                                "per interaction turn"
                             )
                         },
                     )
@@ -219,6 +219,7 @@ class InteractionAgentRuntime:
                     if tool_call.name in {
                         "delegate_execution",
                         "start_workflow",
+                        "signal_workflow_wait",
                     }:
                         execution_submissions_attempted += 1
                     result = await self._execute_tool(tool_call)

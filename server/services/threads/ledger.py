@@ -287,7 +287,10 @@ class PostgresThreadLedger:
                     composio_user_id=thread["composio_user_id"],
                     input_source_kind=await connection.fetchval(
                         """
-                        SELECT source_kind
+                        SELECT CASE source_kind
+                            WHEN 'inbound' THEN 'user_message'
+                            ELSE source_kind
+                        END
                         FROM conversation_messages
                         WHERE thread_id = $1
                           AND ingress_sequence = $2
