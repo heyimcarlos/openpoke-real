@@ -57,6 +57,9 @@ Worker:   .venv/bin/python -m server.worker --concurrency 2 --no-local-result-pr
 Migrator: .venv/bin/python -m server.migrate
 ```
 
+Pair each application container with a pinned Cloud SQL Auth Proxy sidecar.
+API, worker, and migrator still use one identical backend image digest.
+
 The initial API service accepts only IAM-authenticated internal traffic because
 several existing Gmail routes do not yet enforce end-user authentication.
 Worker pools have no public HTTP ingress. Cloud SQL has no public IP.
@@ -130,11 +133,13 @@ The application operating budget is 50 connections. The initial maximum leaves
 connections and administrator access need a separate instance-level allowance.
 
 The initial API deployment has one replica because chat and scheduler state are
-not safe for multiple replicas. Four API replicas are the connection-budget
-envelope after that state is externalized. The worker pool runs one to four
-instances with two execution slots each. Its maximum capacity is therefore
-eight, matching the PostgreSQL global active-task cap. The per-tenant active cap
-remains two.
+not safe for multiple replicas. Configure the Cloud Run API service with maximum
+instances set to one, then verify that limit after every deployment.
+The minimum may be zero or one based on cold-start needs. Four API replicas are
+the connection-budget envelope only after issue #8 externalizes that state. The
+worker pool runs one to four instances with two execution slots each. Its
+maximum capacity is therefore eight, matching the PostgreSQL global active-task
+cap. The per-tenant active cap remains two.
 
 ## Identities and secrets
 
@@ -146,6 +151,10 @@ Use four service accounts:
 | Worker | connect as worker database user, read execution provider and tool secrets | DDL, public ingress, deployment |
 | Migrator | connect as migration database owner for the migration Job | provider secrets, serving traffic |
 | Deployer | push/read release images, deploy approved revisions, act as the three runtime identities | direct database login |
+
+Grant the API, worker, and migrator identities the Cloud SQL Client role, which
+contains `cloudsql.instances.connect`. Keep their PostgreSQL database roles
+separate as shown above.
 
 GitHub deployment authentication should use Workload Identity Federation, not a
 stored service-account key. Runtime secret values are Secret Manager references,
@@ -165,6 +174,15 @@ connector over private IP. The proxy or connector verifies the instance and
 encrypts its upstream connection. A raw external PostgreSQL DSN without verified
 TLS is not an approved production configuration.
 
+For this runtime, run a pinned Cloud SQL Auth Proxy sidecar with `--private-ip`
+and a loopback listener. Cloud Run service, worker-pool, and Job sidecars share
+their instance's network namespace, so the application DSN connects to the
+proxy on `127.0.0.1`, never directly to Cloud SQL. Attach all three runtimes to
+Direct VPC egress or a Serverless VPC Access connector that can reach the
+instance's private IP. Store the role-specific PostgreSQL password in Secret
+Manager. Configure container startup ordering and a proxy startup probe so the
+application does not start before the proxy is ready.
+
 The current HS256 JWT verifier shares signing material. Production should verify
 asymmetric tokens from an identity provider's JWKS so the API never holds the
 token issuer's signing key.
@@ -175,12 +193,16 @@ token issuer's signing key.
    latency does not.
 2. Build the backend image once and record its immutable digest.
 3. Confirm Cloud SQL backups and point-in-time recovery before schema changes.
-4. Run `.venv/bin/python -m server.migrate` once as the dedicated migrator
+4. Verify the API, worker, and migrator identities have Cloud SQL Client, the
+   pinned Auth Proxy sidecar uses private IP, VPC egress reaches the instance,
+   and each role's DSN points only to the sidecar's loopback listener.
+5. Run `.venv/bin/python -m server.migrate` once as the dedicated migrator
    identity. Migrations must be backward compatible with the running revision.
-5. Deploy the API command at the recorded digest, initially with one replica.
-6. Deploy the private worker pool command at the same digest, with two slots per
+6. Deploy the API command at the recorded digest with maximum instances set to
+   one. Verify the deployed service reports that maximum.
+7. Deploy the private worker pool command at the same digest, with two slots per
    instance.
-7. Submit an authenticated synthetic task and confirm acceptance, claim, fenced
+8. Submit an authenticated synthetic task and confirm acceptance, claim, fenced
    completion in PostgreSQL, queue depth, oldest runnable age, and database
    connection use. Test browser-visible result delivery separately only after
    issue #8 supplies durable Threads and Agent Runs.
