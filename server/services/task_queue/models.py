@@ -18,6 +18,27 @@ class TaskStatus(str, Enum):
     QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
+    DEAD_LETTERED = "dead_lettered"
+    CANCELLED = "cancelled"
+
+
+class FailureCode(str, Enum):
+    SYNTHETIC_RETRYABLE = "synthetic_retryable"
+    SYNTHETIC_NON_RETRYABLE = "synthetic_non_retryable"
+    LEASE_EXPIRED = "lease_expired"
+    ATTEMPTS_EXHAUSTED = "attempts_exhausted"
+
+
+class TaskFailure(BaseModel):
+    """Allowlisted failure data safe to persist and expose."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    code: FailureCode
+
+    @property
+    def retryable(self) -> bool:
+        return self.code is FailureCode.SYNTHETIC_RETRYABLE
 
 
 def canonical_json(value: JsonValue) -> str:
@@ -92,6 +113,8 @@ class TaskRecord:
     input: dict[str, JsonValue]
     status: TaskStatus
     result: dict[str, JsonValue] | None
+    attempt_count: int
+    failure: FailureCode | None
     created_at: datetime
 
 
