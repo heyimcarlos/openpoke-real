@@ -50,7 +50,11 @@ OpenPoke is a simplified, open-source take on [Interaction Company’s](https://
    ```bash
    uv sync --locked --group dev
    ```
-6. **Mint a short-lived local chat token.**
+6. **Apply database migrations:**
+   ```bash
+   uv run --locked python -m server.migrate
+   ```
+7. **Mint a short-lived local chat token.**
    ```bash
    uv run --locked python -m scripts.mint_local_chat_token
    ```
@@ -59,23 +63,23 @@ OpenPoke is a simplified, open-source take on [Interaction Company’s](https://
    `OPENPOKE_LOCAL_COMPOSIO_USER_ID` are single-user development shims. The
    proxy rejects them when `NODE_ENV=production`. A production UI must
    authenticate each browser user and resolve that identity server-side.
-7. **Install frontend dependencies:**
+8. **Install frontend dependencies:**
    ```bash
    npm install --prefix web
    ```
-8. **Start the FastAPI server:**
+9. **Start the FastAPI server:**
    ```bash
    uv run --locked python -m server.server --reload
    ```
-9. **Start the durable execution worker (new terminal):**
+10. **Start the durable execution worker (new terminal):**
    ```bash
-   uv run --locked python -m server.worker
+   uv run --locked python -m server.worker --concurrency 2
    ```
-10. **Start the Next.js app (new terminal):**
+11. **Start the Next.js app (new terminal):**
    ```bash
    npm run dev --prefix web
    ```
-11. **Connect Gmail for email workflows.** With the services running, open [http://localhost:3000](http://localhost:3000), head to *Settings → Gmail*, and complete the Composio OAuth flow. This step is required for email drafting, replies, and the important-email monitor.
+12. **Connect Gmail for email workflows.** With the services running, open [http://localhost:3000](http://localhost:3000), head to *Settings → Gmail*, and complete the Composio OAuth flow. This step is required for email drafting, replies, and the important-email monitor.
 
 The web app proxies API calls to the Python server using the values in `.env`, so keeping both processes running is required for end-to-end flows.
 
@@ -107,12 +111,22 @@ provider:
 ```bash
 docker compose --env-file compose.test.env -f compose.test.yaml up -d --wait
 uv sync --locked --group dev
-uv run --locked pytest -q
+uv run --locked ruff check .
+uv run --locked pytest -q -m "not postgres"
+uv run --locked pytest -q -m postgres
+npm ci --prefix web
+npm run lint --prefix web
+npm run build --prefix web
+docker build --tag openpoke-backend:local .
 docker compose --env-file compose.test.env -f compose.test.yaml down
 ```
 
 The test database listens only on `127.0.0.1:55432` and uses trust
 authentication for this disposable local environment.
+
+The reviewed GCP role mapping, connection budget, scaling policy, deployment
+order, and rollback boundary are in
+[docs/operations/gcp.md](docs/operations/gcp.md).
 
 ## Project Layout
 - `server/` – FastAPI application and agents
