@@ -21,6 +21,7 @@ from server.agents.execution_agent import (
     BoundedReasoningExecutor,
     ReasoningLimits,
 )
+from server.agents.interaction_agent import build_system_prompt
 from server.services.task_queue import (
     ExecutionFailure,
     ExecutorKind,
@@ -267,6 +268,14 @@ async def _start_demo(
             },
         ),
     )
+
+
+def test_interaction_agent_catalog_includes_reasoning_approval_workflow() -> None:
+    prompt = build_system_prompt()
+
+    assert "openpoke.reasoning_approval_demo" in prompt
+    assert "Report the returned Wait identity" in prompt
+    assert "`approval_note` string" in prompt
 
 
 @pytest.mark.asyncio
