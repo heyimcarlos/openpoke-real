@@ -3,8 +3,17 @@
 from __future__ import annotations
 
 import json
+import hashlib
 
 import asyncpg
+
+from ..task_queue import (
+    TaskSuspension,
+    TaskSuspensionRecord,
+    append_task_wake,
+    canonical_json,
+    suspension_record_from_row,
+)
 
 
 async def record_workflow_task_claimed(
@@ -135,8 +144,6 @@ async def advance_workflow_for_task(
         )
         if task_update != "UPDATE 1":
             raise RuntimeError("blocked Workflow task could not be released")
-        from ..task_queue.outbox import append_task_wake
-
         await append_task_wake(
             connection,
             task_id=candidate["execution_task_id"],
@@ -269,6 +276,169 @@ async def record_workflow_task_failed(
     )
 
 
+async def suspend_workflow_task(
+    connection: asyncpg.Connection,
+    task: asyncpg.Record,
+    suspension: TaskSuspension,
+) -> TaskSuspensionRecord:
+    """Open a published interruption Wait and persist one immutable Attempt."""
+
+    step = await _step_for_task(connection, task["task_id"])
+    if step is None:
+        raise RuntimeError("only Workflow Steps can suspend")
+    instance = await _lock_instance(connection, step["instance_id"])
+    if instance["status"] != "active":
+        raise RuntimeError("Workflow Instance is not active")
+    interruption = await connection.fetchrow(
+        """
+        SELECT mapping.wait_id
+        FROM workflow_step_interruption_waits AS mapping
+        JOIN workflow_wait_blueprints AS blueprint
+          ON blueprint.wait_id = mapping.wait_id
+        WHERE mapping.step_id = $1
+          AND blueprint.wait_key = $2
+        FOR UPDATE OF mapping
+        """,
+        step["step_id"],
+        suspension.wait_key,
+    )
+    if interruption is None:
+        raise RuntimeError(
+            "Workflow Definition does not allow this Step interruption"
+        )
+    wait = await connection.fetchrow(
+        """
+        INSERT INTO workflow_waits (wait_id, instance_id)
+        VALUES ($1, $2)
+        ON CONFLICT (wait_id) DO NOTHING
+        RETURNING *
+        """,
+        interruption["wait_id"],
+        step["instance_id"],
+    )
+    if wait is None:
+        raise RuntimeError("Workflow interruption Wait is already open or terminal")
+    updated = await connection.execute(
+        """
+        UPDATE workflow_steps
+        SET status = 'blocked'
+        WHERE step_id = $1 AND status = 'running'
+        """,
+        step["step_id"],
+    )
+    if updated != "UPDATE 1":
+        raise RuntimeError("Workflow Step cannot accept a suspension")
+
+    serialized_state = canonical_json(suspension.state)
+    snapshot = await connection.fetchrow(
+        """
+        INSERT INTO workflow_run_state_snapshots (
+            instance_id,
+            step_id,
+            task_id,
+            wait_id,
+            attempt_count,
+            lease_generation,
+            codec_version,
+            agents_sdk_version,
+            agent_definition_version,
+            model_requests_used,
+            specialist_calls_used,
+            state_json,
+            state_sha256
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13
+        )
+        RETURNING *
+        """,
+        step["instance_id"],
+        step["step_id"],
+        task["task_id"],
+        wait["wait_id"],
+        task["attempt_count"],
+        task["lease_generation"],
+        suspension.compatibility.codec_version,
+        suspension.compatibility.agents_sdk_version,
+        suspension.compatibility.agent_definition_version,
+        suspension.model_requests_used,
+        suspension.specialist_calls_used,
+        serialized_state,
+        hashlib.sha256(serialized_state.encode("utf-8")).hexdigest(),
+    )
+    await _append_event(
+        connection,
+        instance_id=step["instance_id"],
+        event_type="step_attempt_suspended",
+        payload={
+            "step_id": str(step["step_id"]),
+            "task_id": str(task["task_id"]),
+            "wait_id": str(wait["wait_id"]),
+            "lease_generation": task["lease_generation"],
+            "attempt_count": task["attempt_count"],
+            "codec_version": suspension.compatibility.codec_version,
+            "agents_sdk_version": suspension.compatibility.agents_sdk_version,
+            "agent_definition_version": (
+                suspension.compatibility.agent_definition_version
+            ),
+            "model_requests_used": suspension.model_requests_used,
+            "specialist_calls_used": suspension.specialist_calls_used,
+        },
+    )
+    return suspension_record_from_row(snapshot)
+
+
+async def release_suspended_workflow_task(
+    connection: asyncpg.Connection,
+    wait_id,
+) -> asyncpg.Record | None:
+    """Make the suspended logical Step runnable after its exact Wait is satisfied."""
+
+    candidate = await connection.fetchrow(
+        """
+        SELECT step.step_id,
+               step.execution_task_id,
+               task.executor_kind
+        FROM workflow_run_state_snapshots AS snapshot
+        JOIN workflow_steps AS step ON step.step_id = snapshot.step_id
+        JOIN execution_tasks AS task
+          ON task.task_id = step.execution_task_id
+        WHERE snapshot.wait_id = $1
+          AND step.status = 'blocked'
+          AND task.status = 'blocked'
+        FOR UPDATE OF step, task
+        """,
+        wait_id,
+    )
+    if candidate is None:
+        return None
+    step_update = await connection.execute(
+        """
+        UPDATE workflow_steps
+        SET status = 'runnable'
+        WHERE step_id = $1 AND status = 'blocked'
+        """,
+        candidate["step_id"],
+    )
+    task_update = await connection.execute(
+        """
+        UPDATE execution_tasks
+        SET status = 'queued'
+        WHERE task_id = $1 AND status = 'blocked'
+        """,
+        candidate["execution_task_id"],
+    )
+    if step_update != "UPDATE 1" or task_update != "UPDATE 1":
+        raise RuntimeError("suspended Workflow Step could not be released")
+    await append_task_wake(
+        connection,
+        task_id=candidate["execution_task_id"],
+        executor_kind=candidate["executor_kind"],
+        source_transition="signal_released",
+    )
+    return candidate
+
+
 async def _open_ready_waits(
     connection: asyncpg.Connection,
     instance_id,
@@ -284,6 +454,11 @@ async def _open_ready_waits(
                   SELECT 1
                   FROM workflow_waits AS existing
                   WHERE existing.wait_id = blueprint.wait_id
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM workflow_step_interruption_waits AS interruption
+                  WHERE interruption.wait_id = blueprint.wait_id
               )
               AND NOT EXISTS (
                   SELECT 1

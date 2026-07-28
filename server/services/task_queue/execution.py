@@ -10,6 +10,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from .models import ExecutorKind, FailureCode, TaskFailure, TaskLease
+from .suspension import TaskSuspension
 
 
 class Executor(Protocol):
@@ -27,6 +28,14 @@ class ExecutionFailure(RuntimeError):
     def __init__(self, failure: TaskFailure) -> None:
         super().__init__(failure.code.value)
         self.failure = failure
+
+
+class ExecutionSuspended(RuntimeError):
+    """An executor paused without failing and emitted durable state."""
+
+    def __init__(self, suspension: TaskSuspension) -> None:
+        super().__init__("execution suspended")
+        self.suspension = suspension
 
 
 class ExecutorRegistry:

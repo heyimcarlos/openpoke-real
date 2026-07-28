@@ -14,6 +14,7 @@ from ..task_queue import (
     SubmitTask,
     TaskAdmission,
     TaskStatus,
+    append_task_wake,
     canonical_json,
 )
 from ..threads import AgentRunLease
@@ -337,6 +338,24 @@ class PostgresWorkflowStore:
                 waits_by_key = {
                     item["wait_key"]: item for item in wait_blueprints
                 }
+                for template in definition.step_templates:
+                    if template.interruption_wait_key is None:
+                        continue
+                    await connection.execute(
+                        """
+                        INSERT INTO workflow_step_interruption_waits (
+                            instance_id,
+                            step_id,
+                            wait_id
+                        )
+                        VALUES ($1, $2, $3)
+                        """,
+                        row["instance_id"],
+                        steps_by_key[template.key]["step_id"],
+                        waits_by_key[
+                            template.interruption_wait_key
+                        ]["wait_id"],
+                    )
                 for prerequisite in definition.wait_prerequisites or ():
                     await connection.execute(
                         """
@@ -377,6 +396,11 @@ class PostgresWorkflowStore:
                           SELECT 1
                           FROM workflow_wait_prerequisites AS prerequisite
                           WHERE prerequisite.wait_id = blueprint.wait_id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM workflow_step_interruption_waits AS interruption
+                          WHERE interruption.wait_id = blueprint.wait_id
                       )
                     RETURNING *
                     """,
@@ -636,6 +660,14 @@ class PostgresWorkflowStore:
                     connection,
                     command.wait_id,
                 )
+                from .kernel import release_suspended_workflow_task
+
+                resumed = await release_suspended_workflow_task(
+                    connection,
+                    command.wait_id,
+                )
+                if resumed is not None:
+                    released = [*released, resumed]
                 await _append_workflow_event(
                     connection,
                     instance_id=blueprint["instance_id"],
@@ -828,8 +860,6 @@ async def _release_wait_routes(
         )
         if updated_step != "UPDATE 1" or updated_task != "UPDATE 1":
             raise RuntimeError("Wait route could not release Workflow Step")
-        from ..task_queue.outbox import append_task_wake
-
         await append_task_wake(
             connection,
             task_id=candidate["execution_task_id"],

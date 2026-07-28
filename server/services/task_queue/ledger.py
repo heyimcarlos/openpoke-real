@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import timedelta
 from pathlib import Path
@@ -22,6 +23,13 @@ from .models import (
     TaskLease,
     TaskRecord,
     canonical_json,
+)
+from .suspension import (
+    RunStateCompatibility,
+    RunStateIncompatible,
+    TaskSuspension,
+    TaskSuspensionRecord,
+    suspension_record_from_row,
 )
 
 _CLAIM_CAPACITY_LOCK_ID = 5_716_553_685_489_545
@@ -361,6 +369,87 @@ class PostgresTaskLedger:
 
                     await append_execution_result(connection, row)
         return task_from_row(row)
+
+    async def suspend(
+        self,
+        lease: TaskLease,
+        suspension: TaskSuspension,
+    ) -> TaskSuspensionRecord:
+        """Persist one interruption and revoke the current completion lease."""
+
+        async with self._pool.acquire() as connection:
+            async with connection.transaction():
+                await _lock_workflow_instance_for_task(
+                    connection,
+                    lease.task_id,
+                )
+                row = await connection.fetchrow(
+                    """
+                    UPDATE execution_tasks
+                    SET status = 'blocked',
+                        lease_owner = NULL,
+                        lease_expires_at = NULL
+                    WHERE task_id = $1
+                      AND status = 'running'
+                      AND lease_owner = $2
+                      AND lease_generation = $3
+                      AND lease_expires_at > clock_timestamp()
+                    RETURNING *
+                    """,
+                    lease.task_id,
+                    lease.worker_id,
+                    lease.lease_generation,
+                )
+                if row is None:
+                    raise StaleLease("task lease is expired or superseded")
+                from ..workflows import suspend_workflow_task
+
+                return await suspend_workflow_task(
+                    connection,
+                    row,
+                    suspension,
+                )
+
+    async def load_suspension(
+        self,
+        lease: TaskLease,
+        compatibility: RunStateCompatibility,
+    ) -> TaskSuspensionRecord | None:
+        """Load state only for the currently fenced, newly leased Attempt."""
+
+        row = await self._pool.fetchrow(
+            """
+            SELECT snapshot.*
+            FROM workflow_run_state_snapshots AS snapshot
+            JOIN workflow_waits AS wait ON wait.wait_id = snapshot.wait_id
+            JOIN execution_tasks AS task ON task.task_id = snapshot.task_id
+            WHERE snapshot.task_id = $1
+              AND wait.status = 'satisfied'
+              AND task.status = 'running'
+              AND task.lease_owner = $2
+              AND task.lease_generation = $3
+              AND task.lease_expires_at > clock_timestamp()
+              AND task.attempt_count > snapshot.attempt_count
+              AND task.lease_generation > snapshot.lease_generation
+            """,
+            lease.task_id,
+            lease.worker_id,
+            lease.lease_generation,
+        )
+        if row is None:
+            return None
+        snapshot = suspension_record_from_row(row)
+        if snapshot.compatibility != compatibility:
+            raise RunStateIncompatible(
+                "persisted RunState version is incompatible"
+            )
+        serialized_state = canonical_json(snapshot.state)
+        if (
+            hashlib.sha256(serialized_state.encode("utf-8")).hexdigest()
+            != row["state_sha256"]
+        ):
+            raise RunStateIncompatible("persisted RunState failed integrity check")
+        return snapshot
 
     async def fail(
         self,

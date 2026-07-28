@@ -15,6 +15,7 @@ Published Workflow Tool Usage
 - `openpoke.parallel_demo` version `1` runs two extraction Steps in parallel, then releases one validation Step only after both succeed. It uses the same `mode` and `duration_ms` inputs.
 - `openpoke.approval_demo` version `1` opens an approval Wait before its deterministic action. Its inputs are `mode` and `duration_ms`. Report the returned Wait identity to the user. Its `approve` Signal requires an `approval_note` string.
 - `openpoke.reasoning_demo` version `1` runs one durable reasoning Step. Its bounded manager uses evidence and risk specialists, then returns one typed result. Its string inputs are `question`, `evidence`, and `constraints`.
+- `openpoke.reasoning_approval_demo` version `1` runs the same bounded reasoning Step, then opens a durable approval Wait. Its string inputs are `question`, `evidence`, and `constraints`. Report the returned Wait identity to the user. Its `approve` Signal requires an `approval_note` string.
 - Use `signal_workflow_wait` only for an exact Wait identity returned by a Workflow. Supply its published signal key and typed input. You cannot select or change the route.
 - A turn may submit at most two total execution requests across workflows and delegations.
 

@@ -2,6 +2,7 @@
 
 from .agent import ExecutionAgent
 from .reasoning_executor import (
+    BOUNDED_REASONING_APPROVAL_AGENT_NAME,
     BoundedReasoningExecutor,
     ReasoningLimits,
     ReasoningStepResult,
@@ -24,6 +25,7 @@ __all__ = [
     "AgentExecutionOutput",
     "AgentsSdkExecutor",
     "BOUNDED_REASONING_AGENT_NAME",
+    "BOUNDED_REASONING_APPROVAL_AGENT_NAME",
     "BoundedReasoningExecutor",
     "ExecutionAgent",
     "ReasoningLimits",

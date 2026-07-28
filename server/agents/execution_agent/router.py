@@ -12,6 +12,7 @@ from ...services.task_queue import (
     TaskFailure,
     TaskLease,
 )
+from .reasoning_executor import BOUNDED_REASONING_APPROVAL_AGENT_NAME
 
 
 BOUNDED_REASONING_AGENT_NAME = "bounded-reasoning-manager"
@@ -34,7 +35,10 @@ class WorkflowAwareAgentExecutor:
         self._bounded_reasoning = bounded_reasoning
 
     async def execute(self, lease: TaskLease) -> dict[str, JsonValue]:
-        if lease.agent_name != BOUNDED_REASONING_AGENT_NAME:
+        if lease.agent_name not in {
+            BOUNDED_REASONING_AGENT_NAME,
+            BOUNDED_REASONING_APPROVAL_AGENT_NAME,
+        }:
             return await self._independent.execute(lease)
         if lease.workflow_instance_id is None or lease.workflow_step_id is None:
             raise ExecutionFailure(TaskFailure(code=FailureCode.AGENT_NON_RETRYABLE))
