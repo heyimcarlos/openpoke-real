@@ -272,10 +272,14 @@ async def _start_demo(
 
 def test_interaction_agent_catalog_includes_reasoning_approval_workflow() -> None:
     prompt = build_system_prompt()
+    catalog_line = next(
+        line
+        for line in prompt.splitlines()
+        if "openpoke.reasoning_approval_demo" in line
+    )
 
-    assert "openpoke.reasoning_approval_demo" in prompt
-    assert "Report the returned Wait identity" in prompt
-    assert "`approval_note` string" in prompt
+    assert "Report the returned Wait identity" in catalog_line
+    assert "`approval_note` string" in catalog_line
 
 
 @pytest.mark.asyncio
