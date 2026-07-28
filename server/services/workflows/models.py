@@ -57,6 +57,12 @@ class StepTemplate(BaseModel):
         pattern=r"^[^\x00-\x1f\x7f]+$",
     )
     executor_kind: ExecutorKind
+    interruption_wait_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    )
 
 
 class StepDependency(BaseModel):
@@ -194,6 +200,22 @@ class WorkflowDefinition(BaseModel):
         if (prerequisites or routes) and not waits:
             raise ValueError("workflow Wait relations require a Wait")
         known_waits = set(wait_keys)
+        interruption_waits = {
+            step.interruption_wait_key
+            for step in self.step_templates
+            if step.interruption_wait_key is not None
+        }
+        if any(wait_key not in known_waits for wait_key in interruption_waits):
+            raise ValueError(
+                "Step interruption Wait references an unknown Wait"
+            )
+        if len(interruption_waits) != sum(
+            step.interruption_wait_key is not None
+            for step in self.step_templates
+        ):
+            raise ValueError(
+                "an interruption Wait may belong to only one Step"
+            )
         if any(
             item.wait_key not in known_waits
             or item.prerequisite_step_key not in known
@@ -212,7 +234,18 @@ class WorkflowDefinition(BaseModel):
         if len({(item.wait_key, item.step_key) for item in routes}) != len(routes):
             raise ValueError("Wait routes must be unique")
         routed_waits = {item.wait_key for item in routes}
-        if known_waits - routed_waits:
+        if routed_waits & interruption_waits:
+            raise ValueError(
+                "an interruption Wait cannot also release a different Step"
+            )
+        if any(
+            item.wait_key in interruption_waits
+            for item in prerequisites
+        ):
+            raise ValueError(
+                "an interruption Wait opens only when its Step suspends"
+            )
+        if known_waits - routed_waits - interruption_waits:
             raise ValueError("every Wait must have a predefined route")
 
         graph = {f"step:{key}": set() for key in step_keys}

@@ -21,15 +21,39 @@ from agents import (
     ToolInputGuardrail,
     ToolInputGuardrailData,
     ToolInputGuardrailTripwireTriggered,
+    function_tool,
 )
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from ...services.task_queue import (
     ExecutionFailure,
+    ExecutionSuspended,
     FailureCode,
+    RunStateIncompatible,
     TaskFailure,
     TaskLease,
 )
+from .run_state_codec import AgentsRunStateCodec
+
+
+BOUNDED_REASONING_APPROVAL_AGENT_NAME = (
+    "bounded-reasoning-approval-manager"
+)
+APPROVAL_AGENT_DEFINITION_VERSION = (
+    "bounded-reasoning-approval-manager:v1"
+)
+APPROVAL_WAIT_KEY = "approval"
+APPROVAL_TOOL_NAME = "commit_recommendation"
+
+
+@function_tool(
+    name_override=APPROVAL_TOOL_NAME,
+    needs_approval=True,
+)
+async def _commit_recommendation(summary: str) -> str:
+    """Record the approved recommendation inside this bounded Step."""
+
+    return f"Approved recommendation: {summary}"
 
 
 class ReasoningStepInput(BaseModel):
@@ -136,10 +160,16 @@ class _ModelRequestBudgetExceeded(RuntimeError):
 class _ModelRequestBudget(RunHooks):
     """One aggregate request budget shared by manager and nested agents."""
 
-    def __init__(self, maximum: int) -> None:
+    def __init__(self, maximum: int, *, initial_used: int = 0) -> None:
+        if not 0 <= initial_used <= maximum:
+            raise ValueError("initial model request usage exceeds its limit")
         self._maximum = maximum
-        self._used = 0
+        self._used = initial_used
         self._lock = asyncio.Lock()
+
+    @property
+    def used(self) -> int:
+        return self._used
 
     async def on_llm_start(
         self,
@@ -158,18 +188,28 @@ class _ModelRequestBudget(RunHooks):
 class _SpecialistCallBudget:
     """Bound child starts and reject repeated SDK call identities."""
 
-    def __init__(self, maximum: int) -> None:
+    def __init__(self, maximum: int, *, initial_used: int = 0) -> None:
+        if not 0 <= initial_used <= maximum:
+            raise ValueError("initial specialist usage exceeds its limit")
         self._maximum = maximum
+        self._initial_used = initial_used
         self._charged_call_ids: set[str] = set()
         self._anonymous_calls = 0
         self._lock = asyncio.Lock()
+
+    @property
+    def used(self) -> int:
+        return (
+            self._initial_used
+            + len(self._charged_call_ids)
+            + self._anonymous_calls
+        )
 
     async def reserve(self, call_id: str | None) -> bool:
         async with self._lock:
             if call_id and call_id in self._charged_call_ids:
                 return False
-            used = len(self._charged_call_ids) + self._anonymous_calls
-            if used >= self._maximum:
+            if self.used >= self._maximum:
                 return False
             if call_id:
                 self._charged_call_ids.add(call_id)
@@ -188,18 +228,56 @@ class BoundedReasoningExecutor:
         runner: Any = Runner,
         limits: ReasoningLimits = ReasoningLimits(),
         tracing_enabled: bool = False,
+        run_state_store: Any | None = None,
     ) -> None:
         self._model = model
         self._runner = runner
         self._limits = limits
         self._tracing_enabled = tracing_enabled
+        self._run_state_store = run_state_store
 
     async def execute(self, lease: TaskLease) -> dict[str, JsonValue]:
         if lease.workflow_instance_id is None or lease.workflow_step_id is None:
             raise ExecutionFailure(TaskFailure(code=FailureCode.AGENT_NON_RETRYABLE))
         task_input = ReasoningStepInput.model_validate(lease.input)
-        budget = _ModelRequestBudget(self._limits.max_model_requests)
-        specialist_budget = _SpecialistCallBudget(self._limits.max_specialist_calls)
+        approval_enabled = (
+            lease.agent_name == BOUNDED_REASONING_APPROVAL_AGENT_NAME
+        )
+        if approval_enabled and self._run_state_store is None:
+            raise ExecutionFailure(
+                TaskFailure(code=FailureCode.AGENT_NON_RETRYABLE)
+            )
+        codec = AgentsRunStateCodec(
+            agent_definition_version=APPROVAL_AGENT_DEFINITION_VERSION
+        )
+        snapshot = None
+        if approval_enabled:
+            try:
+                snapshot = await self._run_state_store.load_suspension(
+                    lease,
+                    codec.compatibility,
+                )
+            except RunStateIncompatible as exc:
+                raise ExecutionFailure(
+                    TaskFailure(code=FailureCode.AGENT_NON_RETRYABLE)
+                ) from exc
+        try:
+            budget = _ModelRequestBudget(
+                self._limits.max_model_requests,
+                initial_used=(
+                    snapshot.model_requests_used if snapshot is not None else 0
+                ),
+            )
+            specialist_budget = _SpecialistCallBudget(
+                self._limits.max_specialist_calls,
+                initial_used=(
+                    snapshot.specialist_calls_used if snapshot is not None else 0
+                ),
+            )
+        except ValueError as exc:
+            raise ExecutionFailure(
+                TaskFailure(code=FailureCode.AGENT_NON_RETRYABLE)
+            ) from exc
         model_settings = ModelSettings(
             max_tokens=self._limits.max_output_tokens,
             parallel_tool_calls=True,
@@ -228,48 +306,52 @@ class BoundedReasoningExecutor:
             output_type=RiskSpecialistResult,
             handoffs=[],
         )
+        manager_tools = [
+            _bound_specialist_calls(
+                evidence_agent.as_tool(
+                    tool_name="analyze_evidence",
+                    tool_description=(
+                        "Analyze supplied evidence for the exact question."
+                    ),
+                    custom_output_extractor=_typed_output_json,
+                    max_turns=self._limits.specialist_max_turns,
+                    hooks=budget,
+                    failure_error_function=None,
+                    parameters=EvidenceSpecialistInput,
+                ),
+                specialist_budget,
+            ),
+            _bound_specialist_calls(
+                risk_agent.as_tool(
+                    tool_name="review_risks",
+                    tool_description=(
+                        "Review concrete risks for a proposal and constraints."
+                    ),
+                    custom_output_extractor=_typed_output_json,
+                    max_turns=self._limits.specialist_max_turns,
+                    hooks=budget,
+                    failure_error_function=None,
+                    parameters=RiskSpecialistInput,
+                ),
+                specialist_budget,
+            ),
+        ]
+        if approval_enabled:
+            manager_tools.append(_commit_recommendation)
         manager = Agent(
             name="Bounded reasoning manager",
             instructions=(
                 "ROLE: manager\n"
                 "Own the final answer. Use both specialists as tools, then "
                 "return one typed result. Never invent or change Workflow "
-                "Steps."
+                "Steps. When commit_recommendation is available, call it "
+                "after specialist review and before returning the result."
             ),
             model=self._model,
             model_settings=model_settings,
             output_type=ReasoningStepResult,
             handoffs=[],
-            tools=[
-                _bound_specialist_calls(
-                    evidence_agent.as_tool(
-                        tool_name="analyze_evidence",
-                        tool_description=(
-                            "Analyze supplied evidence for the exact question."
-                        ),
-                        custom_output_extractor=_typed_output_json,
-                        max_turns=self._limits.specialist_max_turns,
-                        hooks=budget,
-                        failure_error_function=None,
-                        parameters=EvidenceSpecialistInput,
-                    ),
-                    specialist_budget,
-                ),
-                _bound_specialist_calls(
-                    risk_agent.as_tool(
-                        tool_name="review_risks",
-                        tool_description=(
-                            "Review concrete risks for a proposal and constraints."
-                        ),
-                        custom_output_extractor=_typed_output_json,
-                        max_turns=self._limits.specialist_max_turns,
-                        hooks=budget,
-                        failure_error_function=None,
-                        parameters=RiskSpecialistInput,
-                    ),
-                    specialist_budget,
-                ),
-            ],
+            tools=manager_tools,
         )
         run_config = RunConfig(
             tracing_disabled=not self._tracing_enabled,
@@ -288,13 +370,41 @@ class BoundedReasoningExecutor:
             ),
         )
         try:
+            run_input: Any = task_input.model_dump_json()
+            run_context: Any = None
+            if approval_enabled:
+                if snapshot is None:
+                    run_context = codec.context_for(lease)
+                else:
+                    run_input = await codec.resume(
+                        snapshot,
+                        manager,
+                        lease,
+                        approval_tool_name=APPROVAL_TOOL_NAME,
+                    )
             result = await self._runner.run(
                 manager,
-                task_input.model_dump_json(),
+                run_input,
+                context=run_context,
                 max_turns=self._limits.manager_max_turns,
                 hooks=budget,
                 run_config=run_config,
             )
+            if result.interruptions:
+                if not approval_enabled or snapshot is not None:
+                    raise RunStateIncompatible(
+                        "unexpected Agents SDK interruption"
+                    )
+                raise ExecutionSuspended(
+                    codec.suspend(
+                        result,
+                        lease,
+                        wait_key=APPROVAL_WAIT_KEY,
+                        approval_tool_name=APPROVAL_TOOL_NAME,
+                        model_requests_used=budget.used,
+                        specialist_calls_used=specialist_budget.used,
+                    )
+                )
             output = ReasoningStepResult.model_validate(result.final_output)
         except (
             MaxTurnsExceeded,
@@ -302,12 +412,13 @@ class BoundedReasoningExecutor:
             ToolInputGuardrailTripwireTriggered,
             ValidationError,
             _ModelRequestBudgetExceeded,
+            RunStateIncompatible,
         ) as exc:
             raise ExecutionFailure(
                 TaskFailure(code=FailureCode.AGENT_NON_RETRYABLE)
             ) from exc
         except Exception as exc:
-            if isinstance(exc, ExecutionFailure):
+            if isinstance(exc, (ExecutionFailure, ExecutionSuspended)):
                 raise
             raise ExecutionFailure(
                 TaskFailure(code=FailureCode.AGENT_RETRYABLE)

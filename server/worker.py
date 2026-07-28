@@ -132,6 +132,7 @@ async def _run(
                     tracing_enabled=(
                         settings.agent_sdk_tracing_enabled
                     ),
+                    run_state_store=ledger,
                 ),
             )
         executors = ExecutorRegistry(configured_executors)

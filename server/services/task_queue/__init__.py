@@ -30,20 +30,29 @@ from .outbox import (
     WakeEvent,
     WakeEventLease,
     WakeOutboxRelay,
+    append_task_wake,
 )
 from .broker import (
     BoundedTaskWorkerWakeHandler,
     RabbitMQWakeBroker,
     RabbitMQWakePublisher,
 )
-from .execution import ExecutionFailure
+from .execution import ExecutionFailure, ExecutionSuspended
 from .service import MissingScope, TaskService
+from .suspension import (
+    RunStateCompatibility,
+    RunStateIncompatible,
+    TaskSuspension,
+    TaskSuspensionRecord,
+    suspension_record_from_row,
+)
 
 __all__ = [
     "AdmissionRejected",
     "BoundedTaskWorkerWakeHandler",
     "ExecutorKind",
     "ExecutionFailure",
+    "ExecutionSuspended",
     "FailureCode",
     "IdempotencyConflict",
     "InvalidToken",
@@ -66,8 +75,14 @@ __all__ = [
     "TaskService",
     "TaskStatus",
     "RelayOutcome",
+    "RunStateCompatibility",
+    "RunStateIncompatible",
     "WakeEvent",
     "WakeEventLease",
     "WakeOutboxRelay",
+    "TaskSuspension",
+    "TaskSuspensionRecord",
+    "append_task_wake",
     "canonical_json",
+    "suspension_record_from_row",
 ]

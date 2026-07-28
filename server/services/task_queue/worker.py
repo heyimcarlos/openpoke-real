@@ -9,7 +9,12 @@ from datetime import timedelta
 from enum import Enum
 from uuid import UUID
 
-from .execution import ExecutionFailure, ExecutorRegistry, UnknownExecutor
+from .execution import (
+    ExecutionFailure,
+    ExecutionSuspended,
+    ExecutorRegistry,
+    UnknownExecutor,
+)
 from .ledger import PostgresTaskLedger, StaleLease
 from .models import (
     ExecutorKind,
@@ -29,6 +34,7 @@ class WorkerOutcomeStatus(str, Enum):
     CANCELLED = "cancelled"
     STALE = "stale"
     PROJECTION_FAILED = "projection_failed"
+    SUSPENDED = "suspended"
 
 
 @dataclass(frozen=True)
@@ -87,6 +93,16 @@ class TaskWorker:
             )
         except ExecutionFailure as exc:
             return await self._record_failure(lease, exc.failure)
+        except ExecutionSuspended as exc:
+            try:
+                await self._ledger.suspend(lease, exc.suspension)
+            except StaleLease:
+                return self._stale_outcome(lease)
+            return WorkerOutcome(
+                status=WorkerOutcomeStatus.SUSPENDED,
+                task_id=lease.task_id,
+                attempt_count=lease.attempt_count,
+            )
         except UnknownExecutor:
             return await self._record_failure(
                 lease,

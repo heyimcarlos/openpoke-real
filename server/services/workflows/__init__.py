@@ -4,6 +4,8 @@ from .kernel import (
     advance_workflow_for_task,
     record_workflow_task_claimed,
     record_workflow_task_failed,
+    release_suspended_workflow_task,
+    suspend_workflow_task,
 )
 from .models import (
     FieldContract,
@@ -78,4 +80,6 @@ __all__ = [
     "advance_workflow_for_task",
     "record_workflow_task_claimed",
     "record_workflow_task_failed",
+    "release_suspended_workflow_task",
+    "suspend_workflow_task",
 ]
