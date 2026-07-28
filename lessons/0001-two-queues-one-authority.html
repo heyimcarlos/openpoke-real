@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenPoke: two queues and one authority</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <p class="small">Lesson 1 · <a href="../reference/openpoke-execution-glossary.html">Glossary</a></p>
+      <h1>Two queues, one durable authority</h1>
+      <p class="lede">
+        Trace one chat message through OpenPoke, then separate the conversation turn,
+        delegated execution, and future Workflow Kernel.
+      </p>
+
+      <blockquote class="thesis">
+        PostgreSQL owns the facts. Workers temporarily own leases. Queues only distribute
+        work that deterministic code has already made runnable.
+      </blockquote>
+
+      <div class="legend">
+        <div><span class="pill implemented">Implemented</span> Current code</div>
+        <div><span class="pill partial">Partial</span> First slice exists</div>
+        <div><span class="pill future">Future</span> Open issue</div>
+      </div>
+
+      <h2>The current end-to-end call graph</h2>
+
+      <div class="graph">
+        <article class="step">
+          <span class="pill implemented">Implemented</span>
+          <h3>1. HTTP accepts durable ingress</h3>
+          <p>
+            <code>chat_send()</code> authenticates a Principal, then
+            <code>handle_chat_request()</code> appends the user message.
+          </p>
+        </article>
+        <article class="step">
+          <span class="pill implemented">Implemented</span>
+          <h3>2. The append transaction queues or widens one Agent Run</h3>
+          <p>
+            <code>append_message → _append_ingress → _ensure_queued_run</code>.
+            Rapid messages update the queued run's cutoff instead of creating more runs.
+          </p>
+        </article>
+        <article class="step">
+          <span class="pill implemented">Implemented</span>
+          <h3>3. A conversation worker claims the run</h3>
+          <p>
+            <code>AgentRunWorker.run_once → claim_run</code>. Claiming freezes the input
+            cutoff, assigns context order, increments the attempt and lease generation,
+            and changes <code>queued → running</code>.
+          </p>
+        </article>
+        <article class="step">
+          <span class="pill implemented">Implemented</span>
+          <h3>4. The interaction runtime chooses a response or tool</h3>
+          <p>
+            The current custom OpenRouter loop can answer, call
+            <code>delegate_execution</code>, or call <code>start_workflow</code>.
+          </p>
+        </article>
+        <article class="step">
+          <span class="pill implemented">Implemented</span>
+          <h3>5. A delegation atomically creates an execution task</h3>
+          <p>
+            <code>delegate_execution → submit_delegation → TaskAdmission.accept</code>.
+            The trusted context supplies tenant, actor, origin run, and executor kind.
+          </p>
+        </article>
+        <article class="step">
+          <span class="pill implemented">Implemented</span>
+          <h3>6. An execution worker claims and runs the task</h3>
+          <p>
+            <code>TaskWorker.run_once → PostgresTaskLedger.claim → AgentsSdkExecutor.execute</code>.
+            The Agents SDK Runner owns the temporary tool loop, bounded to eight turns.
+          </p>
+        </article>
+        <article class="step">
+          <span class="pill implemented">Implemented</span>
+          <h3>7. Fenced completion appends a continuation</h3>
+          <p>
+            <code>TaskWorker → ledger.complete → append_execution_result</code>. The task
+            result and new Thread ingress commit in one PostgreSQL transaction.
+          </p>
+        </article>
+        <article class="step">
+          <span class="pill implemented">Implemented</span>
+          <h3>8. The continuation queues another Agent Run</h3>
+          <p>
+            The conversation worker sees <code>source_kind=execution_result</code>, calls
+            <code>handle_agent_message()</code>, and commits the user-facing response.
+          </p>
+        </article>
+      </div>
+
+      <h2>Why there are two queues</h2>
+
+      <div class="split">
+        <section class="queue agent">
+          <h3><code>agent_runs</code></h3>
+          <p><strong>Unit:</strong> one serialized conversation turn.</p>
+          <p><strong>Created by:</strong> durable Thread ingress.</p>
+          <p><strong>Claimed by:</strong> conversation-agent workers.</p>
+          <p><strong>Purpose:</strong> reconstruct context and decide what the user-facing agent does next.</p>
+        </section>
+        <section class="queue task">
+          <h3><code>execution_tasks</code></h3>
+          <p><strong>Unit:</strong> independent delegated work or one runnable Workflow Step.</p>
+          <p><strong>Created by:</strong> trusted delegation or Workflow Kernel code.</p>
+          <p><strong>Claimed by:</strong> execution workers.</p>
+          <p><strong>Purpose:</strong> run bounded deterministic or reasoning execution.</p>
+        </section>
+      </div>
+
+      <p>
+        They cannot safely be one queue because they have different serialization and
+        capacity rules. Agent Runs serialize per Thread. Execution tasks are globally and
+        per-tenant bounded, and may run independently.
+      </p>
+
+      <h2>Exactly how a queued Agent Run appears</h2>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Existing Thread state</th>
+            <th>What new ingress does</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>No queued or running run</td>
+            <td>Insert one <code>agent_runs(status='queued')</code> row.</td>
+            <td>There is unread work and no active owner.</td>
+          </tr>
+          <tr>
+            <td>A run is already queued</td>
+            <td>Increase its <code>ingress_cutoff</code>.</td>
+            <td>Coalesce a burst into one model turn.</td>
+          </tr>
+          <tr>
+            <td>A run is running</td>
+            <td>Append ingress, but create no second active run yet.</td>
+            <td>Preserve one queued or running run per Thread.</td>
+          </tr>
+          <tr>
+            <td>The running run completes and newer ingress exists</td>
+            <td>Insert the next queued run in the completion transaction.</td>
+            <td>Prevent a lost wake-up while keeping the current cutoff frozen.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>
+        The database backs this rule with a partial unique index on
+        <code>agent_runs(thread_id)</code> for statuses <code>queued</code> and
+        <code>running</code>.
+      </p>
+
+      <h2>Roadmap graph, with honest status</h2>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Architecture node</th>
+            <th>Status</th>
+            <th>Current reference</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Threads, Messages, queued Agent Runs</td>
+            <td><span class="pill implemented">Implemented</span></td>
+            <td><code>migrations/007_durable_threads.sql</code>, <code>services/threads</code></td>
+          </tr>
+          <tr>
+            <td>Conversation-agent worker pool</td>
+            <td><span class="pill implemented">Implemented</span></td>
+            <td><code>orchestrator_worker.py</code>, <code>threads/worker.py</code></td>
+          </tr>
+          <tr>
+            <td>Typed Workflow start Command</td>
+            <td><span class="pill implemented">Implemented</span></td>
+            <td><code>interaction_agent/tools.py</code>, <code>workflows/store.py</code></td>
+          </tr>
+          <tr>
+            <td>Versioned Definition, Instance, first Step</td>
+            <td><span class="pill partial">Partial</span></td>
+            <td>Issue 9 is done, only the first runnable Step exists.</td>
+          </tr>
+          <tr>
+            <td>Sequential, parallel, and fan-in release</td>
+            <td><span class="pill future">Future</span></td>
+            <td><a href="https://github.com/heyimcarlos/openpoke-real/issues/10">Issue 10</a></td>
+          </tr>
+          <tr>
+            <td>Durable Wait and exact Signal</td>
+            <td><span class="pill future">Future</span></td>
+            <td><a href="https://github.com/heyimcarlos/openpoke-real/issues/11">Issue 11</a></td>
+          </tr>
+          <tr>
+            <td>PostgreSQL outbox and RabbitMQ wake-ups</td>
+            <td><span class="pill future">Future</span></td>
+            <td><a href="https://github.com/heyimcarlos/openpoke-real/issues/12">Issue 12</a></td>
+          </tr>
+          <tr>
+            <td>Bounded child-agent coordination inside one Step</td>
+            <td><span class="pill future">Future</span></td>
+            <td><a href="https://github.com/heyimcarlos/openpoke-real/issues/13">Issue 13</a></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>Check your model</h2>
+
+      <details>
+        <summary>Who decides that Step B is runnable?</summary>
+        <p>The deterministic Workflow Kernel. Neither RabbitMQ, queue order, an agent, nor a worker owns that decision.</p>
+      </details>
+      <details>
+        <summary>What is the conversation-agent worker pool?</summary>
+        <p>Disposable replicas polling <code>agent_runs</code>. A worker reconstructs one frozen Thread context, runs one bounded interaction turn, and commits only through its current lease.</p>
+      </details>
+      <details>
+        <summary>Why does an execution result create another Agent Run?</summary>
+        <p>The specialist result is durable input, not the final user-facing response. The serialized conversation agent consumes it and decides how to present it or what to do next.</p>
+      </details>
+
+      <h2>Primary references</h2>
+
+      <div class="references">
+        <article class="card">
+          <h3>Product direction</h3>
+          <p><a href="https://github.com/heyimcarlos/openpoke-real/issues/1">PRD and architecture comments</a></p>
+        </article>
+        <article class="card">
+          <h3>Conversation durability</h3>
+          <p><a href="https://github.com/heyimcarlos/openpoke-real/issues/8">Issue 8 contract</a></p>
+        </article>
+        <article class="card">
+          <h3>SDK orchestration</h3>
+          <p><a href="https://openai.github.io/openai-agents-python/multi_agent/">Agents-as-tools and handoffs</a></p>
+        </article>
+      </div>
+
+      <p class="small">
+        Ask your agent to walk through one failure case next: late user ingress, expired
+        conversation lease, stale task completion, or duplicate execution-result delivery.
+      </p>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,26 @@
+/* Portable presentation defaults for systems-lab-ui. */
+.systems-lab-canvas .react-flow__edgelabel-renderer {
+  z-index: 10;
+}
+
+.systems-lab-canvas .react-flow__controls {
+  overflow: hidden;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 0.75rem;
+  box-shadow: 0 8px 24px rgb(15 23 42 / 8%);
+}
+
+.systems-lab-canvas .react-flow__handle {
+  width: 8px;
+  height: 8px;
+  border: 2px solid white;
+  background: rgb(100 116 139);
+}
+
+.systems-lab-canvas .react-flow__handle[data-handleid$="-in"] {
+  transform: translate(-50%, -50%) translateY(-5px);
+}
+
+.systems-lab-canvas .react-flow__handle[data-handleid$="-out"] {
+  transform: translate(-50%, -50%) translateY(5px);
+}

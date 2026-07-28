@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OpenPoke execution glossary</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <p class="small"><a href="../lessons/0001-two-queues-one-authority.html">Lesson 1</a></p>
+      <h1>Execution glossary</h1>
+      <p class="lede">The smallest vocabulary needed to reason about OpenPoke's durable execution design.</p>
+
+      <div class="cards">
+        <article class="card">
+          <h3>Thread</h3>
+          <p>The durable, ordered conversation identity for one tenant, actor, and channel.</p>
+        </article>
+        <article class="card">
+          <h3>Message</h3>
+          <p>A durable input or output record. Ingress order and model-context order are separate.</p>
+        </article>
+        <article class="card">
+          <h3>Agent Run</h3>
+          <p>One bounded, disposable interaction turn over an exact Thread cutoff. It is not a resident agent process.</p>
+        </article>
+        <article class="card">
+          <h3>Conversation-agent worker pool</h3>
+          <p>Replicas of <code>server.orchestrator_worker</code> polling and claiming Agent Runs.</p>
+        </article>
+        <article class="card">
+          <h3>Execution task</h3>
+          <p>Independent durable work delegated by the conversation agent or created as a Workflow Step.</p>
+        </article>
+        <article class="card">
+          <h3>Execution worker pool</h3>
+          <p>Bounded worker slots that claim execution tasks and invoke a fixed executor.</p>
+        </article>
+        <article class="card">
+          <h3>Lease</h3>
+          <p>Temporary permission for one worker and generation to commit a result before expiry.</p>
+        </article>
+        <article class="card">
+          <h3>Fence</h3>
+          <p>A completion check on worker identity, lease generation, status, and expiry that rejects stale work.</p>
+        </article>
+        <article class="card">
+          <h3>Queue</h3>
+          <p>A distributor of work already declared runnable. Today queued PostgreSQL rows provide this role.</p>
+        </article>
+        <article class="card">
+          <h3>Workflow Kernel</h3>
+          <p>Deterministic authority that decides which Step is runnable and what transition follows completion.</p>
+        </article>
+        <article class="card">
+          <h3>Workflow Definition</h3>
+          <p>Immutable, versioned, server-owned structure. A model may select it but cannot rewrite its graph.</p>
+        </article>
+        <article class="card">
+          <h3>Result continuation</h3>
+          <p>An execution result appended as new Thread ingress, causing a later conversation Agent Run.</p>
+        </article>
+        <article class="card">
+          <h3>Agents SDK Runner</h3>
+          <p>The temporary reasoning and tool loop inside one claimed execution task.</p>
+        </article>
+        <article class="card">
+          <h3>RabbitMQ wake-up</h3>
+          <p>A future delivery hint. It does not own state and cannot grant execution authority.</p>
+        </article>
+      </div>
+    </main>
+  </body>
+</html>
